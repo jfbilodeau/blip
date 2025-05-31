@@ -78,6 +78,7 @@ fn main() {
         eprintln!("Error saving model to {}: {}", args.output_file, e);
         return;
     }
+    println!("Model saved in {} seconds", start.elapsed().as_secs_f32());
 
     println!("Done!");
 }
