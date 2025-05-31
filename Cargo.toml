@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["blip_ai", "blip", "blip_trainer"]
