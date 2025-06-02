@@ -1,8 +1,7 @@
 use blip_ai::model::Model;
 use clap::Parser;
-use crate::trainer::{create_training_data, load_training_data};
-
-mod trainer;
+use blip_ai::trainer;
+use blip_ai::trainer::TrainingData;
 
 #[derive(Parser, Debug)]
 #[command(name="Blip Trainer", author = "J-F Bilodeau (jfbilodeau@chronogears.com)", version = "1.0", about, long_about = None)]
@@ -46,6 +45,8 @@ fn main() {
 
     println!();
 
+    let program_start = std::time::Instant::now();
+
     println!("Creating model...");
     let start = std::time::Instant::now();
 
@@ -54,13 +55,12 @@ fn main() {
     );
 
     println!("Model created in {} seconds", start.elapsed().as_secs_f32());
-
-
+    
     println!("Loading training data...");
     let start = std::time::Instant::now();
-    let mut training_data = create_training_data();
+    let mut training_data = TrainingData::new(model);
     for file_name in &args.input_files {
-        if let Err(e) = trainer::load_training_data(file_name, &mut model, &mut training_data) {
+        if let Err(e) = training_data.load(file_name) {
             eprintln!("Error loading training data from {}: {}", file_name, e);
             return;
         }
@@ -69,16 +69,21 @@ fn main() {
 
     println!("Initializing embeddings...");
     let start = std::time::Instant::now();
-    model.initialize_embeddings();
+    training_data.get_model_mut().initialize_embeddings();
     println!("Embeddings initialized in {} seconds", start.elapsed().as_secs_f32());
+    
+    println!("Training multi-head attention...");
+    let start = std::time::Instant::now();
+    training_data.train_multi_head_attention(args.num_epochs, args.learning_rate);
+    println!("Multi-head attention trained in {} seconds", start.elapsed().as_secs_f32());
 
     println!("Saving model...");
     let start = std::time::Instant::now();
-    if let Err(e) = model.save(&args.output_file) {
+    if let Err(e) = training_data.get_model().save(&args.output_file) {
         eprintln!("Error saving model to {}: {}", args.output_file, e);
         return;
     }
     println!("Model saved in {} seconds", start.elapsed().as_secs_f32());
 
-    println!("Done!");
+    println!("Training completed in {} seconds", program_start.elapsed().as_secs_f32());
 }
