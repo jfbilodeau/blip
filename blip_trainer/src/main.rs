@@ -1,7 +1,6 @@
 use blip_ai::model::Model;
-use clap::Parser;
-use blip_ai::trainer;
 use blip_ai::trainer::TrainingData;
+use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name="Blip Trainer", author = "J-F Bilodeau (jfbilodeau@chronogears.com)", version = "1.0", about, long_about = None)]
@@ -50,12 +49,10 @@ fn main() {
     println!("Creating model...");
     let start = std::time::Instant::now();
 
-    let mut model = Model::new(
-        args.embedding_dim,
-    );
+    let mut model = Model::new(args.embedding_dim);
 
     println!("Model created in {} seconds", start.elapsed().as_secs_f32());
-    
+
     println!("Loading training data...");
     let start = std::time::Instant::now();
     let mut training_data = TrainingData::new(model);
@@ -70,12 +67,18 @@ fn main() {
     println!("Initializing embeddings...");
     let start = std::time::Instant::now();
     training_data.get_model_mut().initialize_embeddings();
-    println!("Embeddings initialized in {} seconds", start.elapsed().as_secs_f32());
-    
+    println!(
+        "Embeddings initialized in {} seconds",
+        start.elapsed().as_secs_f32()
+    );
+
     println!("Training multi-head attention...");
     let start = std::time::Instant::now();
     training_data.train_multi_head_attention(args.num_epochs, args.learning_rate);
-    println!("Multi-head attention trained in {} seconds", start.elapsed().as_secs_f32());
+    println!(
+        "Multi-head attention trained in {} seconds",
+        start.elapsed().as_secs_f32()
+    );
 
     println!("Saving model...");
     let start = std::time::Instant::now();
@@ -85,5 +88,8 @@ fn main() {
     }
     println!("Model saved in {} seconds", start.elapsed().as_secs_f32());
 
-    println!("Training completed in {} seconds", program_start.elapsed().as_secs_f32());
+    println!(
+        "Training completed in {} seconds",
+        program_start.elapsed().as_secs_f32()
+    );
 }
