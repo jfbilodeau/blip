@@ -1,16 +1,81 @@
 use crate::model::Model;
+use crate::nn::Optimizer;
 use crate::tokenizer::tokenize;
-use rand::prelude::SliceRandom;
+use log::info;
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
+use rand_chacha::ChaCha12Rng;
 
 #[derive(Clone)]
 pub struct TrainingPrompt {
-    prompt: String,
-    tokens: Vec<usize>,
+    pub text: String,
+    pub tokens: Vec<usize>,
 }
 
 pub struct TrainingData {
     model: Model,
     data: Vec<TrainingPrompt>,
+}
+
+/// Learning-rate schedule applied per optimizer step.
+#[derive(Clone, Copy, Debug)]
+pub enum LrSchedule {
+    /// Constant learning rate. `lr` from `TrainingConfig` is used as-is.
+    Constant,
+    /// Linear warmup for `warmup_steps` from 0 -> `lr`, then cosine decay
+    /// down to `min_lr` over the remaining steps.
+    CosineWithWarmup { warmup_steps: usize, min_lr: f32 },
+}
+
+impl LrSchedule {
+    pub fn lr_at(&self, step: usize, total_steps: usize, base_lr: f32) -> f32 {
+        match *self {
+            LrSchedule::Constant => base_lr,
+            LrSchedule::CosineWithWarmup { warmup_steps, min_lr } => {
+                if step < warmup_steps {
+                    base_lr * (step as f32 + 1.0) / (warmup_steps.max(1) as f32)
+                } else if total_steps <= warmup_steps {
+                    base_lr
+                } else {
+                    let progress = (step - warmup_steps) as f32
+                        / (total_steps - warmup_steps).max(1) as f32;
+                    let cos = 0.5 * (1.0 + (std::f32::consts::PI * progress).cos());
+                    min_lr + (base_lr - min_lr) * cos
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TrainingConfig {
+    pub num_epochs: usize,
+    pub learning_rate: f32,
+    pub batch_size: usize,
+    pub val_split: f32,
+    pub seed: u64,
+    /// Save a checkpoint every N epochs (0 = only at the end).
+    pub checkpoint_every: usize,
+    pub checkpoint_path: Option<String>,
+    pub lr_schedule: LrSchedule,
+    /// Dropout probability applied to attention and FFN outputs during training.
+    pub dropout: f32,
+}
+
+impl Default for TrainingConfig {
+    fn default() -> Self {
+        Self {
+            num_epochs: 100,
+            learning_rate: 1e-3,
+            batch_size: 1,
+            val_split: 0.0,
+            seed: 0,
+            checkpoint_every: 0,
+            checkpoint_path: None,
+            lr_schedule: LrSchedule::Constant,
+            dropout: 0.0,
+        }
+    }
 }
 
 impl TrainingData {
@@ -22,10 +87,9 @@ impl TrainingData {
     }
 
     pub fn add_prompt(&mut self, prompt: &str) {
-        let tokens = tokenize(prompt, &mut self.model); // Assuming a default embedding dimension
-
+        let tokens = tokenize(prompt, &mut self.model);
         self.data.push(TrainingPrompt {
-            prompt: prompt.to_string(),
+            text: prompt.to_string(),
             tokens,
         });
     }
@@ -35,18 +99,11 @@ impl TrainingData {
             .map_err(|e| e.to_string())?
             .lines()
             .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && !l.starts_with('#')) // Ignore empty lines and comments
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect::<Vec<String>>();
-
         for line in lines {
-            let tokens = tokenize(&line, &mut self.model);
-
-            self.data.push(TrainingPrompt {
-                prompt: line,
-                tokens,
-            });
+            self.add_prompt(&line);
         }
-
         Ok(())
     }
 
@@ -58,84 +115,147 @@ impl TrainingData {
         &mut self.model
     }
 
-    pub fn train_multi_head_attention(&mut self, num_epochs: usize, learning_rate: f32) {
-        // Zip all token ids in a single vector
-        let token_stop = self.model.get_stop_token_id();
-        let all_tokens: Vec<usize> = self
-            .data
-            .iter_mut()
-            .map(|p| p.tokens.clone())
-            .map(|mut p| {
-                p.push(token_stop);
-                p
-            })
-            .flat_map(|p| p)
-            .collect();
-
-        for epoch in 0..num_epochs {
-            println!("Training epoch {}/{}", epoch + 1, num_epochs);
-            self.model
-                .train_multi_head_attention(&all_tokens, learning_rate);
-        }
+    pub fn num_prompts(&self) -> usize {
+        self.data.len()
     }
 
-    pub fn train_neural_network(&mut self, num_epochs: usize, learning_rate: f32, batch_size: usize) {
-        let mut rng = rand::rng();
+    /// Trim rare tokens from the vocabulary before training. Re-tokenizes any
+    /// already-loaded prompts so their ids point to the new vocab (rare tokens
+    /// collapse to `<unk>`). Must be called before `initialize_embeddings`.
+    pub fn trim_vocab(&mut self, min_count: u32) -> usize {
+        let removed = self.model.trim_vocab(min_count);
+        if removed > 0 {
+            let unk = self.model.get_unknown_token_id();
+            for prompt in &mut self.data {
+                prompt.tokens = crate::tokenizer::split_tokens(&prompt.text)
+                    .into_iter()
+                    .map(|t| self.model.get_token_id(&t).unwrap_or(unk))
+                    .collect();
+            }
+        }
+        removed
+    }
 
-        for epoch in 0..num_epochs {
-            println!("NN training epoch {}/{}", epoch + 1, num_epochs);
-            let mut prompts = self.data.clone();
-            prompts.shuffle(&mut rng);
+    /// Train using next-token cross-entropy with Adam and global grad clipping.
+    pub fn train(&mut self, cfg: &TrainingConfig) {
+        let bos = self.model.get_begin_token_id();
+        let stop = self.model.get_stop_token_id();
 
-            let mut batch = Vec::new();
-            for prompt in &prompts {
-                for window in prompt.tokens.windows(2) {
-                    let input_id = window[0];
-                    let target_id = window[1];
-                    batch.push((input_id, target_id));
-                    if batch.len() == batch_size {
-                        for (input_id, target_id) in &batch {
-                            self.model
-                                .network_train_step(*input_id, *target_id, learning_rate);
-                        }
-                        batch.clear();
-                    }
+        let mut sequences: Vec<Vec<usize>> = self
+            .data
+            .iter()
+            .map(|p| {
+                let mut s = Vec::with_capacity(p.tokens.len() + 2);
+                s.push(bos);
+                s.extend_from_slice(&p.tokens);
+                s.push(stop);
+                s
+            })
+            .filter(|s| s.len() >= 2)
+            .collect();
+
+        if sequences.is_empty() {
+            eprintln!("No training sequences (need at least 2 tokens per prompt).");
+            return;
+        }
+
+        // Deterministic shuffle of the dataset for the train/val split.
+        let mut split_rng = ChaCha12Rng::seed_from_u64(cfg.seed);
+        sequences.shuffle(&mut split_rng);
+
+        let n_val = ((sequences.len() as f32) * cfg.val_split).floor() as usize;
+        let val_seqs: Vec<Vec<usize>> = sequences.drain(..n_val).collect();
+        let train_seqs = sequences;
+
+        info!(
+            "training on {} sequences, validating on {}",
+            train_seqs.len(),
+            val_seqs.len()
+        );
+
+        // Apply dropout to the model for the duration of training, then turn
+        // it back off so generation/eval are deterministic w.r.t. the model.
+        self.model.set_dropout(cfg.dropout);
+
+        // Each `apply_grads` is one optimizer step. Total steps is bounded by
+        // ceil(train_seqs.len() / batch_size) per epoch.
+        let steps_per_epoch =
+            (train_seqs.len() + cfg.batch_size.max(1) - 1) / cfg.batch_size.max(1);
+        let total_steps = steps_per_epoch * cfg.num_epochs;
+        let mut step: usize = 0;
+
+        let mut epoch_rng = ChaCha12Rng::seed_from_u64(cfg.seed.wrapping_add(1));
+        let mut indices: Vec<usize> = (0..train_seqs.len()).collect();
+
+        for epoch in 0..cfg.num_epochs {
+            indices.shuffle(&mut epoch_rng);
+            let mut total_loss = 0.0_f32;
+            let mut count = 0usize;
+            let mut batch_in_progress = 0usize;
+
+            for &idx in &indices {
+                let loss = self.model.train_sequence(&train_seqs[idx]);
+                total_loss += loss;
+                count += 1;
+                batch_in_progress += 1;
+                if batch_in_progress >= cfg.batch_size {
+                    let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
+                    self.model.apply_grads(Optimizer::adam(lr));
+                    batch_in_progress = 0;
+                    step += 1;
                 }
             }
+            if batch_in_progress > 0 {
+                let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
+                self.model.apply_grads(Optimizer::adam(lr));
+                step += 1;
+            }
+            let train_avg = total_loss / count.max(1) as f32;
 
-            // Traiter le dernier batch s'il n'est pas vide
-            if !batch.is_empty() {
-                for (input_id, target_id) in &batch {
-                    self.model
-                        .network_train_step(*input_id, *target_id, learning_rate);
+            let val_avg = if val_seqs.is_empty() {
+                f32::NAN
+            } else {
+                let mut s = 0.0_f32;
+                let mut c = 0usize;
+                for v in &val_seqs {
+                    s += self.model.eval_sequence(v);
+                    c += 1;
+                }
+                s / c.max(1) as f32
+            };
+
+            if val_avg.is_nan() {
+                println!(
+                    "Epoch {}/{} - train {:.4}",
+                    epoch + 1,
+                    cfg.num_epochs,
+                    train_avg
+                );
+            } else {
+                println!(
+                    "Epoch {}/{} - train {:.4} - val {:.4}",
+                    epoch + 1,
+                    cfg.num_epochs,
+                    train_avg,
+                    val_avg
+                );
+            }
+
+            if cfg.checkpoint_every > 0
+                && (epoch + 1) % cfg.checkpoint_every == 0
+                && cfg.checkpoint_path.is_some()
+            {
+                let path = cfg.checkpoint_path.as_ref().unwrap();
+                if let Err(e) = self.model.save(path) {
+                    eprintln!("Checkpoint save failed: {}", e);
+                } else {
+                    info!("checkpoint saved to {}", path);
                 }
             }
         }
 
-        // let mut rng = rand::rng();
-        // for epoch in 0..num_epochs {
-        //     println!("NN training epoch {}/{}", epoch + 1, num_epochs);
-        //     let mut prompts = self.data.clone();
-        //     prompts.shuffle(&mut rng);
-        //     for prompt in &prompts {
-        //         for window in prompt.tokens.windows(2) {
-        //             let input_id = window[0];
-        //             let target_id = window[1];
-        //             self.model.network_train_step(input_id, target_id, learning_rate);
-        //         }
-        //     }
-        // }
-
-        // for epoch in 0..num_epochs {
-        //     println!("NN training epoch {}/{}", epoch + 1, num_epochs);
-        //     for prompt in &self.data {
-        //         // On entraîne sur chaque paire de tokens consécutifs
-        //         for window in prompt.tokens.windows(2) {
-        //             let input_id = window[0];
-        //             let target_id = window[1];
-        //             self.model.network_train_step(input_id, target_id, learning_rate);
-        //         }
-        //     }
-        // }
+        // Restore inference mode (no-op for forward()/forward_logits, but
+        // keeps `train_sequence` deterministic if called again).
+        self.model.set_dropout(0.0);
     }
 }
