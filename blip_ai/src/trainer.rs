@@ -94,16 +94,73 @@ impl TrainingData {
         });
     }
 
-    pub fn load(&mut self, file_name: &str) -> Result<(), String> {
-        let lines = std::fs::read_to_string(file_name)
-            .map_err(|e| e.to_string())?
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect::<Vec<String>>();
-        for line in lines {
-            self.add_prompt(&line);
+    fn normalize_training_line(line: &str) -> (String, bool) {
+        let trimmed = line.trim();
+        let Some((role, rest)) = trimmed.split_once(':') else {
+            return (trimmed.to_string(), false);
+        };
+
+        let normalized_role = if role.eq_ignore_ascii_case("assistant") {
+            "ai"
+        } else if role.eq_ignore_ascii_case("user") || role.eq_ignore_ascii_case("ai") {
+            role
+        } else {
+            return (trimmed.to_string(), false);
+        };
+
+        (format!("{}:{}", normalized_role, rest.trim()), true)
+    }
+
+    fn load_conversations_from_str(&mut self, contents: &str) {
+        let mut current_conversation: Vec<String> = Vec::new();
+        let mut current_corpus: Vec<String> = Vec::new();
+
+        let flush_conversation = |training_data: &mut TrainingData, conversation: &mut Vec<String>| {
+            if conversation.is_empty() {
+                return;
+            }
+
+            training_data.add_prompt(&conversation.join(" "));
+            conversation.clear();
+        };
+
+        let flush_corpus = |training_data: &mut TrainingData, corpus: &mut Vec<String>| {
+            if corpus.is_empty() {
+                return;
+            }
+
+            training_data.add_prompt(&corpus.join(" "));
+            corpus.clear();
+        };
+
+        for raw_line in contents.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                flush_conversation(self, &mut current_conversation);
+                flush_corpus(self, &mut current_corpus);
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+
+            let (normalized, is_role_line) = Self::normalize_training_line(line);
+            if is_role_line {
+                flush_corpus(self, &mut current_corpus);
+                current_conversation.push(normalized);
+            } else {
+                flush_conversation(self, &mut current_conversation);
+                current_corpus.push(normalized);
+            }
         }
+
+        flush_conversation(self, &mut current_conversation);
+        flush_corpus(self, &mut current_corpus);
+    }
+
+    pub fn load(&mut self, file_name: &str) -> Result<(), String> {
+        let contents = std::fs::read_to_string(file_name).map_err(|e| e.to_string())?;
+        self.load_conversations_from_str(&contents);
         Ok(())
     }
 
@@ -257,5 +314,36 @@ impl TrainingData {
         // Restore inference mode (no-op for forward()/forward_logits, but
         // keeps `train_sequence` deterministic if called again).
         self.model.set_dropout(0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_groups_blank_line_separated_conversations() {
+        let model = Model::new(8, 1, 2);
+        let mut training = TrainingData::new(model);
+        let contents = "# comment\nuser:Who are you?\nai:I am Blip.\n\nuser:What can you do?\nassistant:I can help.\n";
+
+        training.load_conversations_from_str(contents);
+
+        assert_eq!(training.num_prompts(), 2);
+        assert_eq!(training.data[0].text, "user:Who are you? ai:I am Blip.");
+        assert_eq!(training.data[1].text, "user:What can you do? ai:I can help.");
+    }
+
+    #[test]
+    fn load_keeps_legacy_single_line_records() {
+        let model = Model::new(8, 1, 2);
+        let mut training = TrainingData::new(model);
+        let contents = "hello world\nplain text\n";
+
+        training.load_conversations_from_str(contents);
+
+        assert_eq!(training.num_prompts(), 2);
+        assert_eq!(training.data[0].text, "hello world");
+        assert_eq!(training.data[1].text, "plain text");
     }
 }

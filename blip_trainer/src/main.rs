@@ -3,6 +3,44 @@ use blip_ai::nn;
 use blip_ai::trainer::{LrSchedule, TrainingConfig, TrainingData};
 use clap::Parser;
 
+#[cfg(windows)]
+struct SleepGuard;
+
+#[cfg(windows)]
+impl SleepGuard {
+    fn new() -> Self {
+        use windows_sys::Win32::System::Power::{
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+        };
+
+        unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+        }
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SleepGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Power::{ES_CONTINUOUS, SetThreadExecutionState};
+
+        unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct SleepGuard;
+
+#[cfg(not(windows))]
+impl SleepGuard {
+    fn new() -> Self {
+        Self
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "Blip Trainer",
@@ -27,7 +65,7 @@ struct TrainingArgs {
     #[arg(short = 'l', long, default_value = "0.001", help = "Adam learning rate")]
     pub learning_rate: f32,
 
-    #[arg(short = 'b', long, default_value = "1", help = "Sequences per optimizer step")]
+    #[arg(short = 'b', long, default_value = "16", help = "Sequences per optimizer step")]
     pub batch_size: usize,
 
     #[arg(long, default_value = "0.0", help = "Dropout on attention/FFN outputs during training")]
@@ -134,6 +172,7 @@ fn main() {
     };
 
     let train_start = std::time::Instant::now();
+    let _sleep_guard = SleepGuard::new();
     training_data.train(&cfg);
     println!("Training completed in {:.2}s", train_start.elapsed().as_secs_f32());
 

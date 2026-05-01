@@ -150,6 +150,7 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
+ "windows-sys",
 ]
 
 [[package]]

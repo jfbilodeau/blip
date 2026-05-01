@@ -660,6 +660,9 @@ pub struct Model {
     pub blocks: Vec<DecoderBlock>,
     pub final_norm: LayerNorm,
     pub lm_head: Linear,
+    /// Lazily grown cache of sinusoidal positional encodings. Never serialized.
+    #[serde(skip, default)]
+    pe_cache: std::cell::RefCell<Vec<Array1<f32>>>,
 }
 
 impl Model {
@@ -684,6 +687,7 @@ impl Model {
             blocks,
             final_norm: LayerNorm::new(embedding_dim),
             lm_head: Linear::new(embedding_dim, 1),
+            pe_cache: std::cell::RefCell::new(Vec::new()),
         };
 
         model.register_token(TOKEN_UNKNOWN);
@@ -833,21 +837,47 @@ impl Model {
         }
     }
 
+    /// Extend `pe_cache` to cover at least `seq_len` positions. Positions
+    /// already cached are never recomputed.
+    fn ensure_pe(&self, seq_len: usize) {
+        let current = self.pe_cache.borrow().len();
+        if seq_len > current {
+            let mut cache = self.pe_cache.borrow_mut();
+            // Compute only the new tail positions.
+            for pos in current..seq_len {
+                let mut v = Array1::<f32>::zeros(self.embedding_dim);
+                let mut i = 0;
+                while i < self.embedding_dim {
+                    let angle =
+                        pos as f32 / 10000_f32.powf(i as f32 / self.embedding_dim as f32);
+                    v[i] = angle.sin();
+                    if i + 1 < self.embedding_dim {
+                        v[i + 1] = angle.cos();
+                    }
+                    i += 2;
+                }
+                cache.push(v);
+            }
+        }
+    }
+
     fn embed_sequence(&self, ids: &[usize]) -> Vec<Array1<f32>> {
-        let pos = positional_encoding(ids.len(), self.embedding_dim);
+        self.ensure_pe(ids.len());
+        let pe = self.pe_cache.borrow();
         ids.iter()
             .enumerate()
             .map(|(i, &id)| {
                 let mut v = self.embeddings.row(id).to_owned();
-                v += &pos[i];
+                v += &pe[i];
                 v
             })
             .collect()
     }
 
     fn embed_token_at(&self, id: usize, pos: usize) -> Array1<f32> {
+        self.ensure_pe(pos + 1);
+        let pe = self.pe_cache.borrow();
         let mut v = self.embeddings.row(id).to_owned();
-        let pe = positional_encoding(pos + 1, self.embedding_dim);
         v += &pe[pos];
         v
     }

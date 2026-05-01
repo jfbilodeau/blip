@@ -42,9 +42,25 @@ struct BlipArgs {
     pub repl: bool,
 }
 
+fn format_inference_prompt(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return "user: ai:".to_string();
+    }
+    if trimmed.contains("ai:") {
+        return trimmed.to_string();
+    }
+    if let Some(user_text) = trimmed.strip_prefix("user:") {
+        return format!("user:{} ai:", user_text.trim());
+    }
+
+    format!("user:{} ai:", trimmed)
+}
+
 fn run_once(model: &Model, prompt: &str, cfg: &SamplingConfig, seed: u64) {
     let mut tokens = vec![model.get_begin_token_id()];
-    tokens.extend(tokenize_for_inference(prompt, model));
+    let formatted_prompt = format_inference_prompt(prompt);
+    tokens.extend(tokenize_for_inference(&formatted_prompt, model));
     let result = if seed == 0 {
         let mut rng = rand::rng();
         model.generate_token_ids(&tokens, cfg, &mut rng)
@@ -136,5 +152,28 @@ fn main() {
         let prompt = args.prompt.unwrap_or_else(|| "Who are you?".to_string());
         println!("Prompt: {}", prompt);
         run_once(&model, &prompt, &cfg, args.seed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_inference_prompt;
+
+    #[test]
+    fn wraps_plain_prompt_in_user_ai_template() {
+        assert_eq!(format_inference_prompt("Who are you?"), "user:Who are you? ai:");
+    }
+
+    #[test]
+    fn appends_ai_tag_to_existing_user_prompt() {
+        assert_eq!(format_inference_prompt("user:Who are you?"), "user:Who are you? ai:");
+    }
+
+    #[test]
+    fn preserves_explicit_conversation_prompt() {
+        assert_eq!(
+            format_inference_prompt("user:Who are you? ai:I am Blip."),
+            "user:Who are you? ai:I am Blip."
+        );
     }
 }
