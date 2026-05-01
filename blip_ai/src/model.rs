@@ -12,13 +12,14 @@
 //! clipping). Generation supports greedy / temperature / top-k / top-p
 //! sampling.
 //!
-//! Checkpoints are bincode by default (small, fast); JSON is supported for
-//! inspection by giving a path that ends in `.json`.
+//! Checkpoints support both bincode and JSON. The project defaults now use
+//! `.json` paths for easier inspection.
 
 use crate::nn::{
     softmax, softmax_cross_entropy, AdamState2, FeedForward, FeedForwardCache, LayerNorm,
     LayerNormCache, Linear, Optimizer,
 };
+use crate::tokenizer::default_token_texts;
 use crate::version::MODEL_VERSION;
 use ndarray::{Array1, Array2};
 use rand::Rng;
@@ -625,6 +626,21 @@ fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &
     probs.len() - 1
 }
 
+fn argmax_excluding(logits: &Array1<f32>, excluded: usize) -> Option<usize> {
+    let mut best_idx: Option<usize> = None;
+    let mut best_val = f32::NEG_INFINITY;
+    for (i, v) in logits.iter().enumerate() {
+        if i == excluded {
+            continue;
+        }
+        if *v > best_val {
+            best_val = *v;
+            best_idx = Some(i);
+        }
+    }
+    best_idx
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -674,6 +690,9 @@ impl Model {
         model.register_token(TOKEN_STOP);
         model.register_token(TOKEN_TOOL);
         model.register_token(TOKEN_BEGIN);
+        for token in default_token_texts() {
+            model.register_token(&token);
+        }
 
         model
     }
@@ -1099,7 +1118,15 @@ impl Model {
         let mut logits = logits_opt.expect("prompt is non-empty");
         let mut out: Vec<usize> = Vec::new();
         for _ in 0..cfg.max_new_tokens {
-            let next = sample_from_logits(&logits, cfg, rng);
+            let mut next = sample_from_logits(&logits, cfg, rng);
+            // Avoid an immediately empty completion when the very first choice
+            // is `<stop>`. Prefer the best non-stop token once, then allow
+            // normal stopping behavior on subsequent steps.
+            if out.is_empty() && next == stop {
+                if let Some(alt) = argmax_excluding(&logits, stop) {
+                    next = alt;
+                }
+            }
             if next == stop {
                 break;
             }
@@ -1240,5 +1267,28 @@ mod tests {
             let diff = (full[idx] - stepped[idx]).abs();
             assert!(diff < 1e-5, "logit {} mismatch: {} vs {}", idx, full[idx], stepped[idx]);
         }
+    }
+
+    #[test]
+    fn generation_avoids_immediate_stop_on_first_token() {
+        crate::nn::seed(6);
+        let mut m = Model::new(8, 1, 2);
+        m.register_token("a");
+        m.initialize_embeddings();
+
+        // Force deterministic logits where `<stop>` is highest and "a" is
+        // second-highest regardless of prompt state.
+        m.lm_head.weights.fill(0.0);
+        m.lm_head.bias.fill(-10.0);
+        let stop = m.get_stop_token_id();
+        let a = m.get_token_id("a").unwrap();
+        m.lm_head.bias[stop] = 10.0;
+        m.lm_head.bias[a] = 5.0;
+
+        let cfg = SamplingConfig::greedy(1);
+        let bos = m.get_begin_token_id();
+        let mut rng = ChaCha12Rng::seed_from_u64(0);
+        let ids = m.generate_token_ids(&[bos], &cfg, &mut rng).unwrap();
+        assert_eq!(ids, vec![a]);
     }
 }

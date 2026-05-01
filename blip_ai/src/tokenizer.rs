@@ -1,55 +1,81 @@
-use crate::model::Model;
+use crate::model::{Model, TOKEN_UNKNOWN};
 
 #[derive(PartialEq)]
 enum TokenType {
-    Word,
-    Punctuation,
+    Letters,
+    Digits,
+    Symbols,
+    Unknown,
 }
 
-/// Split raw text into the canonical lower-cased token strings.
+const DEFAULT_SYMBOLS: &[char] = &[
+    ' ', '!', '"', '#', '$', '%', '&', '\'', '(', ')', '*', '+', ',', '-', '.', '/', ':', ';',
+    '<', '=', '>', '?', '@', '[', '\\', ']', '^', '_', '`', '{', '|', '}', '~',
+];
+
+pub fn default_token_texts() -> Vec<String> {
+    let mut tokens = Vec::with_capacity(26 + 2 + DEFAULT_SYMBOLS.len());
+    for letter in 'a'..='z' {
+        tokens.push(letter.to_string());
+    }
+    for digit in ['0', '1'] {
+        tokens.push(digit.to_string());
+    }
+    for symbol in DEFAULT_SYMBOLS {
+        tokens.push(symbol.to_string());
+    }
+    tokens
+}
+
+fn classify_char(c: char) -> TokenType {
+    if c.is_ascii_lowercase() {
+        TokenType::Letters
+    } else if matches!(c, '0' | '1') {
+        TokenType::Digits
+    } else if DEFAULT_SYMBOLS.contains(&c) {
+        TokenType::Symbols
+    } else {
+        TokenType::Unknown
+    }
+}
+
+fn push_current(tokens: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        tokens.push(std::mem::take(current));
+    }
+}
+
+/// Split raw text into canonical lower-cased token strings.
 /// Pure function: no model state is touched.
 ///
-/// Apostrophes between alphanumeric characters are kept attached so that
-/// English contractions (`I'm`, `don't`, `we're`) survive as single tokens.
+/// Tokens are ASCII-only runs of lowercase letters, digits, or symbols.
+/// Non-ASCII letters and punctuation become `<unk>`.
 pub fn split_tokens(text: &str) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut current_type: Option<TokenType> = None;
 
-    for (i, &c) in chars.iter().enumerate() {
-        let next_alnum = chars.get(i + 1).map_or(false, |n| n.is_alphanumeric());
-        let prev_alnum = i > 0 && chars[i - 1].is_alphanumeric();
-        // Treat `'` as a word character if it sits between two alphanumerics.
-        let is_word_apostrophe = c == '\'' && prev_alnum && next_alnum;
+    for c in text.chars() {
+        let normalized = c.to_ascii_lowercase();
+        let token_type = classify_char(normalized);
 
-        if c.is_alphanumeric() || is_word_apostrophe {
-            if current_type != Some(TokenType::Word) && !current.is_empty() {
-                tokens.push(current.to_lowercase());
-                current.clear();
+        if current_type.as_ref() != Some(&token_type) {
+            push_current(&mut tokens, &mut current);
+            current_type = Some(token_type);
+        }
+
+        match current_type {
+            Some(TokenType::Letters) | Some(TokenType::Digits) | Some(TokenType::Symbols) => {
+                current.push(normalized);
             }
-            current.push(c);
-            current_type = Some(TokenType::Word);
-        } else if c.is_ascii_punctuation() {
-            if !current.is_empty() {
-                tokens.push(current.to_lowercase());
-                current.clear();
+            Some(TokenType::Unknown) => {
+                current.push_str(TOKEN_UNKNOWN);
             }
-            tokens.push(c.to_string());
-            current_type = Some(TokenType::Punctuation);
-        } else if c.is_whitespace() {
-            if !current.is_empty() {
-                tokens.push(current.to_lowercase());
-                current.clear();
-            }
-            current_type = None;
+            None => {}
         }
     }
 
-    if !current.is_empty() {
-        tokens.push(current.to_lowercase());
-    }
-
+    push_current(&mut tokens, &mut current);
     tokens
 }
 
@@ -78,28 +104,18 @@ pub fn detokenize(tokens: &[usize], model: &Model) -> String {
         .join(" ")
 }
 
-/// Punctuation-aware detokenizer. Skips special `<...>` tokens, omits the
-/// space before closing punctuation (`,`, `.`, `!`, `?`, `;`, `:`, `)`, `]`,
-/// `}`, `'`) and after opening punctuation (`(`, `[`, `{`).
+/// Detokenizer that reconstructs text by concatenating token text directly.
+/// Special `<...>` tokens are skipped.
 pub fn detokenize_text(tokens: &[usize], model: &Model) -> String {
     let mut out = String::new();
-    let mut prev_was_open = false;
     for &id in tokens {
-        let Some(text) = model.get_token_by_id(id) else { continue };
+        let Some(text) = model.get_token_by_id(id) else {
+            continue;
+        };
         if text.starts_with('<') && text.ends_with('>') {
             continue;
         }
-        let no_leading_space = text.len() == 1
-            && matches!(
-                text.chars().next().unwrap(),
-                ',' | '.' | '!' | '?' | ';' | ':' | ')' | ']' | '}' | '\'' | '"'
-            );
-        if !out.is_empty() && !no_leading_space && !prev_was_open {
-            out.push(' ');
-        }
         out.push_str(text);
-        prev_was_open = text.len() == 1
-            && matches!(text.chars().next().unwrap(), '(' | '[' | '{');
     }
     out
 }
@@ -112,23 +128,44 @@ mod tests {
     #[test]
     fn split_lowercases_and_separates_punctuation() {
         let toks = split_tokens("Hello, World!");
-        assert_eq!(toks, vec!["hello", ",", "world", "!"]);
+        assert_eq!(toks, vec!["hello", ", ", "world", "!"]);
     }
 
     #[test]
-    fn split_keeps_contractions_together() {
-        let toks = split_tokens("I'm sure we don't need you're split apart.");
-        assert_eq!(
-            toks,
-            vec!["i'm", "sure", "we", "don't", "need", "you're", "split", "apart", "."]
-        );
+    fn split_groups_ascii_letter_digit_and_symbol_runs() {
+        let toks = split_tokens("abc==101  xyz-10");
+        assert_eq!(toks, vec!["abc", "==", "101", "  ", "xyz", "-", "10"]);
+    }
+
+    #[test]
+    fn split_maps_non_ascii_to_unk() {
+        let toks = split_tokens("caf");
+        assert_eq!(toks, vec!["caf", "<unk><unk>"]);
+
+        let toks = split_tokens("café!");
+        assert_eq!(toks, vec!["caf", "<unk>", "!"]);
+
+        let toks = split_tokens("a😀b");
+        assert_eq!(toks, vec!["a", "<unk>", "b"]);
+    }
+
+    #[test]
+    fn default_tokens_include_ascii_letters_digits_and_symbols() {
+        let defaults = default_token_texts();
+        assert!(defaults.iter().any(|t| t == "a"));
+        assert!(defaults.iter().any(|t| t == "z"));
+        assert!(defaults.iter().any(|t| t == "0"));
+        assert!(defaults.iter().any(|t| t == "1"));
+        assert!(!defaults.iter().any(|t| t == "9"));
+        assert!(defaults.iter().any(|t| t == " "));
+        assert!(defaults.iter().any(|t| t == "="));
     }
 
     #[test]
     fn tokenize_registers_then_inference_finds() {
         let mut model = Model::new(8, 1, 2);
         let train_ids = tokenize("Hello world", &mut model);
-        assert_eq!(train_ids.len(), 2);
+        assert_eq!(train_ids.len(), 3);
 
         let infer_ids = tokenize_for_inference("hello WORLD", &model);
         assert_eq!(infer_ids, train_ids);
@@ -138,10 +175,14 @@ mod tests {
     fn inference_maps_unknown_to_unk() {
         let mut model = Model::new(8, 1, 2);
         tokenize("hello", &mut model);
-        let ids = tokenize_for_inference("hello bonjour", &model);
+        let ids = tokenize_for_inference("hello bonjour café", &model);
         let unk = model.get_unknown_token_id();
-        assert_eq!(ids.len(), 2);
+        assert_eq!(ids.len(), 6);
         assert_ne!(ids[0], unk);
-        assert_eq!(ids[1], unk);
+        assert_ne!(ids[1], unk);
+        assert_eq!(ids[2], unk);
+        assert_ne!(ids[3], unk);
+        assert_eq!(ids[4], unk);
+        assert_eq!(ids[5], unk);
     }
 }

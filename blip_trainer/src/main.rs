@@ -54,7 +54,7 @@ struct TrainingArgs {
     #[arg(short = 'i', long, default_values = vec!["training/basic.txt"])]
     pub input_files: Vec<String>,
 
-    #[arg(short = 'o', long, default_value = "models/basic.bin",
+    #[arg(short = 'o', long, default_value = "models/basic.json",
           help = "Output path. .json => JSON, otherwise bincode.")]
     pub output_file: String,
 }

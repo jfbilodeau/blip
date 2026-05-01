@@ -60,13 +60,13 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | `--seed`          | 0 (= OS entropy)      | RNG seed for init / shuffling               |
 | `--checkpoint-every` | 0 (= end only)     | Save every N epochs                         |
 | `-i, --input-files`  | `training/basic.txt` | Training corpus(es)                       |
-| `-o, --output-file`  | `models/basic.bin` | Output checkpoint (`.json` → JSON, else bincode) |
+| `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` → JSON, else bincode) |
 
 ## Inference flags
 
 | Flag              | Default               | Meaning                                     |
 | ----------------- | --------------------- | ------------------------------------------- |
-| `-f, --model-file` | `models/basic.bin`   | Checkpoint to load                          |
+| `-f, --model-file` | `models/basic.json`   | Checkpoint to load                          |
 | `-p, --prompt`    | `Who are you?`        | One-shot prompt                             |
 | `-m, --max-new-tokens` | 64               | Generation budget                           |
 | `-t, --temperature` | 0.0 (= greedy)      | Sampling temperature                        |
@@ -113,7 +113,8 @@ Model version is stamped in `blip_ai/src/version.rs`. Loading accepts current
 version and compatible v0.4 checkpoints, then normalizes to the current
 version in-memory before saving.
 Path extension picks the format: `.json` is human-readable, anything else is
-bincode (smaller and faster).
+bincode (smaller and faster). The CLI defaults to `models/basic.json` and will
+fallback to `models/basic.bin` if the JSON path is missing.
 
 ## Limitations / roadmap
 
