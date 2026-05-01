@@ -53,13 +53,13 @@ struct TrainingArgs {
     #[arg(short = 'e', long, default_value = "128", help = "Embedding dimension")]
     pub embedding_dim: usize,
 
-    #[arg(short = 'd', long, default_value = "2", help = "Number of decoder blocks")]
+    #[arg(short = 'd', long, default_value = "4", help = "Number of decoder blocks")]
     pub depth: usize,
 
     #[arg(long, default_value = "4", help = "Number of attention heads")]
     pub n_heads: usize,
 
-    #[arg(short = 'n', long = "epochs", default_value = "200")]
+    #[arg(short = 'n', long = "epochs", default_value = "60")]
     pub num_epochs: usize,
 
     #[arg(short = 'l', long, default_value = "0.001", help = "Adam learning rate")]
@@ -68,28 +68,28 @@ struct TrainingArgs {
     #[arg(short = 'b', long, default_value = "16", help = "Sequences per optimizer step")]
     pub batch_size: usize,
 
-    #[arg(long, default_value = "0.0", help = "Dropout on attention/FFN outputs during training")]
+    #[arg(long, default_value = "0.10", help = "Dropout on attention/FFN outputs during training")]
     pub dropout: f32,
 
-    #[arg(long, default_value = "0.0", help = "Validation split fraction (0..1)")]
+    #[arg(long, default_value = "0.10", help = "Validation split fraction (0..1)")]
     pub val_split: f32,
 
-    #[arg(long, default_value = "0", help = "Warmup steps for cosine LR schedule (0 = constant LR)")]
+    #[arg(long, default_value = "200", help = "Warmup steps for cosine LR schedule (0 = constant LR)")]
     pub warmup_steps: usize,
 
-    #[arg(long, default_value = "0.0", help = "Minimum LR reached by cosine decay after warmup")]
+    #[arg(long, default_value = "0.0001", help = "Minimum LR reached by cosine decay after warmup")]
     pub min_lr: f32,
 
-    #[arg(long, default_value = "0", help = "Random seed (0 = OS entropy)")]
+    #[arg(long, default_value = "42", help = "Random seed (0 = OS entropy)")]
     pub seed: u64,
 
-    #[arg(long, default_value = "0", help = "Save checkpoint every N epochs (0 = end only)")]
+    #[arg(long, default_value = "10", help = "Save checkpoint every N epochs (0 = end only)")]
     pub checkpoint_every: usize,
 
-    #[arg(long, default_value = "1", help = "Drop tokens whose usage_count is below this (specials always kept)")]
+    #[arg(long, default_value = "3", help = "Drop tokens whose usage_count is below this (specials always kept)")]
     pub min_count: u32,
 
-    #[arg(short = 'i', long, default_values = vec!["training/basic.txt"])]
+    #[arg(short = 'i', long, default_values = vec!["training/corpus.txt", "training/basic.txt"])]
     pub input_files: Vec<String>,
 
     #[arg(short = 'o', long, default_value = "models/basic.json",
