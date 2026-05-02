@@ -1,5 +1,6 @@
 use blip_ai::model::Model;
 use blip_ai::nn;
+use blip_ai::pretraining::PretrainingData;
 use blip_ai::trainer::{LrSchedule, StopTokenMode, TrainingConfig, TrainingData};
 use clap::Parser;
 use std::collections::HashSet;
@@ -90,6 +91,9 @@ struct TrainingArgs {
 
     #[arg(long, default_value = "3", help = "Drop tokens whose usage_count is below this (specials always kept)")]
     pub min_count: u32,
+
+    #[arg(long, default_value = "256", help = "Target sequence length (tokens) for pretraining corpus loader")]
+    pub seq_length: usize,
 
     #[arg(short = 'p', long, default_values = vec!["training/pretraining/*", "training/pretraining/books/*"], help = "Pretraining (corpus) files to use")]
     pub pretraining_files: Vec<String>,
@@ -187,6 +191,7 @@ fn main() {
     println!(" - warmup_steps:  {}", args.warmup_steps);
     println!(" - min_lr:        {}", args.min_lr);
     println!(" - seed:          {}", args.seed);
+    println!(" - seq_length:    {} (pretraining)", args.seq_length);
     println!(" - pretraining:   {:?}", pretraining_files);
     println!(" - tuning:        {:?}", tuning_files);
     println!(" - output:        {}", args.output_file);
