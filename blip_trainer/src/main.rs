@@ -1,7 +1,9 @@
 use blip_ai::model::Model;
 use blip_ai::nn;
-use blip_ai::trainer::{LrSchedule, TrainingConfig, TrainingData};
+use blip_ai::trainer::{LrSchedule, StopTokenMode, TrainingConfig, TrainingData};
 use clap::Parser;
+use std::collections::HashSet;
+use std::path::Path;
 
 #[cfg(windows)]
 struct SleepGuard;
@@ -89,18 +91,85 @@ struct TrainingArgs {
     #[arg(long, default_value = "3", help = "Drop tokens whose usage_count is below this (specials always kept)")]
     pub min_count: u32,
 
-    #[arg(short = 'i', long, default_values = vec!["training/corpus.txt", "training/basic.txt"])]
-    pub input_files: Vec<String>,
+    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*", "training/pretraining/books/*"], help = "Pretraining (corpus) files to use")]
+    pub pretraining_files: Vec<String>,
+
+    #[arg(short = 't', long = "tuning-files", default_values = vec!["training/tuning/*"], help = "Tuning files to use")]
+    pub tuning_files: Vec<String>,
 
     #[arg(short = 'o', long, default_value = "models/basic.json",
           help = "Output path. .json => JSON, otherwise bincode.")]
     pub output_file: String,
 }
 
+fn has_glob_meta(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
+}
+
+fn expand_input_files(patterns: &[String], kind: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for pattern in patterns {
+        if has_glob_meta(pattern) {
+            let mut matched_any = false;
+            let entries = glob::glob(pattern)
+                .map_err(|e| format!("Invalid {} wildcard pattern '{}': {}", kind, pattern, e))?;
+            for entry in entries {
+                let path = entry.map_err(|e| {
+                    format!(
+                        "Error expanding {} wildcard pattern '{}': {}",
+                        kind, pattern, e
+                    )
+                })?;
+                if path.is_file() {
+                    matched_any = true;
+                    let file_name = path.to_string_lossy().to_string();
+                    if seen.insert(file_name.clone()) {
+                        out.push(file_name);
+                    }
+                }
+            }
+            if !matched_any {
+                return Err(format!(
+                    "No {} files matched wildcard pattern '{}'",
+                    kind, pattern
+                ));
+            }
+        } else {
+            let path = Path::new(pattern);
+            if !path.is_file() {
+                return Err(format!("{} file '{}' does not exist", kind, pattern));
+            }
+            if seen.insert(pattern.clone()) {
+                out.push(pattern.clone());
+            }
+        }
+    }
+
+    out.sort();
+    Ok(out)
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = TrainingArgs::parse();
+
+    let pretraining_files = match expand_input_files(&args.pretraining_files, "pretraining") {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("{}", e);
+            return;
+        }
+    };
+    let tuning_files = match expand_input_files(&args.tuning_files, "tuning") {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("{}", e);
+            return;
+        }
+    };
 
     if args.seed != 0 {
         nn::seed(args.seed);
@@ -118,7 +187,8 @@ fn main() {
     println!(" - warmup_steps:  {}", args.warmup_steps);
     println!(" - min_lr:        {}", args.min_lr);
     println!(" - seed:          {}", args.seed);
-    println!(" - inputs:        {:?}", args.input_files);
+    println!(" - pretraining:   {:?}", pretraining_files);
+    println!(" - tuning:        {:?}", tuning_files);
     println!(" - output:        {}", args.output_file);
     println!();
 
@@ -126,14 +196,22 @@ fn main() {
 
     let model = Model::new(args.embedding_dim, args.depth, args.n_heads);
     let mut training_data = TrainingData::new(model);
-    for file_name in &args.input_files {
+
+    // Preload all datasets once so vocabulary is complete before embeddings init.
+    for file_name in &pretraining_files {
         if let Err(e) = training_data.load(file_name) {
-            eprintln!("Error loading training data from {}: {}", file_name, e);
+            eprintln!("Error loading pretraining data from {}: {}", file_name, e);
+            return;
+        }
+    }
+    for file_name in &tuning_files {
+        if let Err(e) = training_data.load(file_name) {
+            eprintln!("Error loading tuning data from {}: {}", file_name, e);
             return;
         }
     }
     println!(
-        "Loaded {} prompts, vocab = {}",
+        "Loaded {} prompts for vocabulary build, vocab = {}",
         training_data.num_prompts(),
         training_data.get_model().vocab_size()
     );
@@ -173,7 +251,39 @@ fn main() {
 
     let train_start = std::time::Instant::now();
     let _sleep_guard = SleepGuard::new();
-    training_data.train(&cfg);
+
+    training_data.clear_prompts();
+    for file_name in &pretraining_files {
+        if let Err(e) = training_data.load_with_existing_vocab(file_name) {
+            eprintln!("Error loading pretraining data from {}: {}", file_name, e);
+            return;
+        }
+    }
+    if training_data.num_prompts() > 0 {
+        println!(
+            "Pretraining on {} prompts (without <stop>)",
+            training_data.num_prompts()
+        );
+        training_data.train_with_stop_mode(&cfg, StopTokenMode::NoStop);
+    }
+
+    training_data.clear_prompts();
+    for file_name in &tuning_files {
+        if let Err(e) = training_data.load_with_existing_vocab(file_name) {
+            eprintln!("Error loading chat tuning data from {}: {}", file_name, e);
+            return;
+        }
+    }
+    if training_data.num_prompts() == 0 {
+        eprintln!("No chat-tuning prompts loaded from tuning_files.");
+        return;
+    }
+    println!(
+        "Chat-tuning on {} prompts (with <stop>)",
+        training_data.num_prompts()
+    );
+    training_data.train_with_stop_mode(&cfg, StopTokenMode::AppendStop);
+
     println!("Training completed in {:.2}s", train_start.elapsed().as_secs_f32());
 
     if let Err(e) = training_data.get_model().save(&args.output_file) {

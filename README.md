@@ -21,19 +21,17 @@ cross-entropy.
 
 ## Quickstart
 
-Train on the bundled sample (`training/basic.txt`):
+Train with the default corpus globs (`training/pretraining/*` and `training/tuning/*`):
 
 ```pwsh
 cargo run --release -p blip_trainer -- `
-  -e 64 -d 2 --n-heads 4 -n 400 --seed 42 `
-  --dropout 0.1 --warmup-steps 100 --min-lr 0.0001 `
-    -o models/basic.bin
+  -o models/basic.bin
 ```
 
-Generate:
+Generate a one-shot response:
 
 ```pwsh
-cargo run --release -p blip -- -p "I am" -m 32 -t 0.8 --seed 1
+cargo run --release -p blip -- --repl false -p "I am" -m 32 -t 0.8 --seed 1
 ```
 
 REPL:
@@ -47,19 +45,20 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | Flag              | Default               | Meaning                                     |
 | ----------------- | --------------------- | ------------------------------------------- |
 | `-e, --embedding-dim` | 128               | Embedding / model dimension                 |
-| `-d, --depth`     | 2                     | Number of decoder blocks                    |
+| `-d, --depth`     | 4                     | Number of decoder blocks                    |
 | `--n-heads`       | 4                     | Attention heads (must divide `embedding_dim`) |
-| `-n, --epochs`    | 200                   | Training epochs                             |
+| `-n, --epochs`    | 60                    | Training epochs                             |
 | `-l, --learning-rate` | 0.001             | Adam learning rate                          |
-| `-b, --batch-size` | 1                    | Sequences per optimizer step                |
-| `--dropout`       | 0.0                   | Training-time dropout on attention/FFN outputs |
-| `--val-split`     | 0.0                   | Validation split fraction                   |
-| `--warmup-steps`  | 0                     | Warmup steps for cosine LR (`0` = constant LR) |
-| `--min-lr`        | 0.0                   | Final LR floor for cosine decay             |
-| `--min-count`     | 1                     | Drop tokens below this usage_count (specials always kept) |
-| `--seed`          | 0 (= OS entropy)      | RNG seed for init / shuffling               |
-| `--checkpoint-every` | 0 (= end only)     | Save every N epochs                         |
-| `-i, --input-files`  | `training/basic.txt` | Training corpus(es)                       |
+| `-b, --batch-size` | 16                   | Sequences per optimizer step                |
+| `--dropout`       | 0.10                  | Training-time dropout on attention/FFN outputs |
+| `--val-split`     | 0.10                  | Validation split fraction                   |
+| `--warmup-steps`  | 200                   | Warmup steps for cosine LR (`0` = constant LR) |
+| `--min-lr`        | 0.0001                | Final LR floor for cosine decay             |
+| `--min-count`     | 3                     | Drop tokens below this usage_count (specials always kept) |
+| `--seed`          | 42                    | RNG seed for init / shuffling               |
+| `--checkpoint-every` | 10                | Save every N epochs                         |
+| `-p, --pretraining-files` | `training/pretraining/*` | Pretraining corpus file(s), trained without `<stop>` |
+| `-t, --tuning-files`  | `training/tuning/*` | Chat-tuning file(s), trained with `<stop>` |
 | `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` → JSON, else bincode) |
 
 ## Inference flags
@@ -67,13 +66,13 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | Flag              | Default               | Meaning                                     |
 | ----------------- | --------------------- | ------------------------------------------- |
 | `-f, --model-file` | `models/basic.json`   | Checkpoint to load                          |
-| `-p, --prompt`    | `Who are you?`        | One-shot prompt                             |
+| `-p, --prompt`    | none                  | One-shot prompt; if `--repl false`, falls back to `Who are you?` |
 | `-m, --max-new-tokens` | 64               | Generation budget                           |
 | `-t, --temperature` | 0.0 (= greedy)      | Sampling temperature                        |
 | `--top-k`         | none                  | Top-k filter                                |
 | `--top-p`         | none                  | Nucleus-sampling cutoff                     |
 | `--seed`          | 0 (= OS entropy)      | Sampling RNG seed                           |
-| `--repl`          | off                   | Interactive prompt loop                     |
+| `--repl`          | true                  | Interactive prompt loop                     |
 
 ## Architecture
 
@@ -91,8 +90,10 @@ token_id
 ```
 
 Special tokens: `<unk>`, `<stop>`, `<tool>`, `<bos>`. `<bos>` is prepended at
-training and inference time; `<stop>` is appended at training time and
-terminates generation.
+training and inference time. The trainer runs in two phases by default:
+pretraining files are trained without appending `<stop>`, then chat-tuning
+files are trained with `<stop>` appended to each sequence. During inference,
+generation stops when `<stop>` is sampled.
 
 ## Tests
 

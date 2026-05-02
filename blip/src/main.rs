@@ -38,7 +38,7 @@ struct BlipArgs {
     #[arg(long, default_value = "0", help = "RNG seed for sampling (0 = random)")]
     pub seed: u64,
 
-    #[arg(long, help = "Interactive REPL mode")]
+    #[arg(long, default_value = "true", help = "Interactive REPL mode")]
     pub repl: bool,
 }
 

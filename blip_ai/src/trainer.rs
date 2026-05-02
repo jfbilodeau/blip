@@ -2,6 +2,8 @@ use crate::model::Model;
 use crate::nn::Optimizer;
 use crate::tokenizer::tokenize;
 use log::info;
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha12Rng;
@@ -15,6 +17,12 @@ pub struct TrainingPrompt {
 pub struct TrainingData {
     model: Model,
     data: Vec<TrainingPrompt>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum StopTokenMode {
+    AppendStop,
+    NoStop,
 }
 
 /// Learning-rate schedule applied per optimizer step.
@@ -86,12 +94,24 @@ impl TrainingData {
         }
     }
 
-    pub fn add_prompt(&mut self, prompt: &str) {
-        let tokens = tokenize(prompt, &mut self.model);
+    fn add_prompt_internal(&mut self, prompt: &str, register_new_tokens: bool) {
+        let tokens = if register_new_tokens {
+            tokenize(prompt, &mut self.model)
+        } else {
+            let unk = self.model.get_unknown_token_id();
+            crate::tokenizer::split_tokens(prompt)
+                .into_iter()
+                .map(|t| self.model.get_token_id(&t).unwrap_or(unk))
+                .collect()
+        };
         self.data.push(TrainingPrompt {
             text: prompt.to_string(),
             tokens,
         });
+    }
+
+    pub fn add_prompt(&mut self, prompt: &str) {
+        self.add_prompt_internal(prompt, true);
     }
 
     fn normalize_training_line(line: &str) -> (String, bool) {
@@ -111,33 +131,37 @@ impl TrainingData {
         (format!("{}:{}", normalized_role, rest.trim()), true)
     }
 
-    fn load_conversations_from_str(&mut self, contents: &str) {
+    fn load_conversations_from_str(&mut self, contents: &str, register_new_tokens: bool) {
         let mut current_conversation: Vec<String> = Vec::new();
         let mut current_corpus: Vec<String> = Vec::new();
 
-        let flush_conversation = |training_data: &mut TrainingData, conversation: &mut Vec<String>| {
+        let flush_conversation = |training_data: &mut TrainingData,
+                                  conversation: &mut Vec<String>,
+                                  register_new_tokens: bool| {
             if conversation.is_empty() {
                 return;
             }
 
-            training_data.add_prompt(&conversation.join(" "));
+            training_data.add_prompt_internal(&conversation.join(" "), register_new_tokens);
             conversation.clear();
         };
 
-        let flush_corpus = |training_data: &mut TrainingData, corpus: &mut Vec<String>| {
+        let flush_corpus = |training_data: &mut TrainingData,
+                            corpus: &mut Vec<String>,
+                            register_new_tokens: bool| {
             if corpus.is_empty() {
                 return;
             }
 
-            training_data.add_prompt(&corpus.join(" "));
+            training_data.add_prompt_internal(&corpus.join(" "), register_new_tokens);
             corpus.clear();
         };
 
         for raw_line in contents.lines() {
             let line = raw_line.trim();
             if line.is_empty() {
-                flush_conversation(self, &mut current_conversation);
-                flush_corpus(self, &mut current_corpus);
+                flush_conversation(self, &mut current_conversation, register_new_tokens);
+                flush_corpus(self, &mut current_corpus, register_new_tokens);
                 continue;
             }
             if line.starts_with('#') {
@@ -146,22 +170,29 @@ impl TrainingData {
 
             let (normalized, is_role_line) = Self::normalize_training_line(line);
             if is_role_line {
-                flush_corpus(self, &mut current_corpus);
+                flush_corpus(self, &mut current_corpus, register_new_tokens);
                 current_conversation.push(normalized);
             } else {
-                flush_conversation(self, &mut current_conversation);
+                flush_conversation(self, &mut current_conversation, register_new_tokens);
                 current_corpus.push(normalized);
-                flush_corpus(self, &mut current_corpus);
+                flush_corpus(self, &mut current_corpus, register_new_tokens);
             }
         }
 
-        flush_conversation(self, &mut current_conversation);
-        flush_corpus(self, &mut current_corpus);
+        flush_conversation(self, &mut current_conversation, register_new_tokens);
+        flush_corpus(self, &mut current_corpus, register_new_tokens);
     }
 
     pub fn load(&mut self, file_name: &str) -> Result<(), String> {
         let contents = std::fs::read_to_string(file_name).map_err(|e| e.to_string())?;
-        self.load_conversations_from_str(&contents);
+        self.load_conversations_from_str(&contents, true);
+        Ok(())
+    }
+
+    /// Load prompts without expanding vocabulary. Unknown tokens map to `<unk>`.
+    pub fn load_with_existing_vocab(&mut self, file_name: &str) -> Result<(), String> {
+        let contents = std::fs::read_to_string(file_name).map_err(|e| e.to_string())?;
+        self.load_conversations_from_str(&contents, false);
         Ok(())
     }
 
@@ -175,6 +206,10 @@ impl TrainingData {
 
     pub fn num_prompts(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn clear_prompts(&mut self) {
+        self.data.clear();
     }
 
     /// Trim rare tokens from the vocabulary before training. Re-tokenizes any
@@ -196,6 +231,14 @@ impl TrainingData {
 
     /// Train using next-token cross-entropy with Adam and global grad clipping.
     pub fn train(&mut self, cfg: &TrainingConfig) {
+        self.train_with_stop_mode(cfg, StopTokenMode::AppendStop);
+    }
+
+    /// Train using next-token cross-entropy with Adam and global grad clipping.
+    ///
+    /// `StopTokenMode::AppendStop` appends `<stop>` to each prompt.
+    /// `StopTokenMode::NoStop` leaves prompts open-ended.
+    pub fn train_with_stop_mode(&mut self, cfg: &TrainingConfig, stop_mode: StopTokenMode) {
         let bos = self.model.get_begin_token_id();
         let stop = self.model.get_stop_token_id();
 
@@ -203,10 +246,16 @@ impl TrainingData {
             .data
             .iter()
             .map(|p| {
-                let mut s = Vec::with_capacity(p.tokens.len() + 2);
+                let extra = match stop_mode {
+                    StopTokenMode::AppendStop => 2,
+                    StopTokenMode::NoStop => 1,
+                };
+                let mut s = Vec::with_capacity(p.tokens.len() + extra);
                 s.push(bos);
                 s.extend_from_slice(&p.tokens);
-                s.push(stop);
+                if matches!(stop_mode, StopTokenMode::AppendStop) {
+                    s.push(stop);
+                }
                 s
             })
             .filter(|s| s.len() >= 2)
@@ -244,18 +293,42 @@ impl TrainingData {
 
         let mut epoch_rng = ChaCha12Rng::seed_from_u64(cfg.seed.wrapping_add(1));
         let mut indices: Vec<usize> = (0..train_seqs.len()).collect();
+        let mut progress_line = ProgressLine::default();
 
         for epoch in 0..cfg.num_epochs {
             indices.shuffle(&mut epoch_rng);
             let mut total_loss = 0.0_f32;
             let mut count = 0usize;
             let mut batch_in_progress = 0usize;
+            let epoch_start = Instant::now();
+            let mut last_progress_update = epoch_start.checked_sub(Duration::from_secs(1)).unwrap_or(epoch_start);
 
             for &idx in &indices {
                 let loss = self.model.train_sequence(&train_seqs[idx]);
                 total_loss += loss;
                 count += 1;
                 batch_in_progress += 1;
+
+                let should_update_progress = count == train_seqs.len()
+                    || last_progress_update.elapsed() >= Duration::from_millis(250);
+                if should_update_progress {
+                    let percent = (count as f32 / train_seqs.len().max(1) as f32) * 100.0;
+                    let avg_loss = total_loss / count.max(1) as f32;
+                    let current_lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
+                    progress_line.print(&format!(
+                        "Epoch {}/{} [{:>5.1}%] {}/{} seq - avg loss {:.4} - lr {:.6} - {:.1}s",
+                        epoch + 1,
+                        cfg.num_epochs,
+                        percent,
+                        count,
+                        train_seqs.len(),
+                        avg_loss,
+                        current_lr,
+                        epoch_start.elapsed().as_secs_f32()
+                    ));
+                    last_progress_update = Instant::now();
+                }
+
                 if batch_in_progress >= cfg.batch_size {
                     let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
                     self.model.apply_grads(Optimizer::adam(lr));
@@ -281,6 +354,8 @@ impl TrainingData {
                 }
                 s / c.max(1) as f32
             };
+
+            progress_line.clear();
 
             if val_avg.is_nan() {
                 println!(
@@ -318,6 +393,32 @@ impl TrainingData {
     }
 }
 
+#[derive(Default)]
+struct ProgressLine {
+    last_len: usize,
+}
+
+impl ProgressLine {
+    fn print(&mut self, message: &str) {
+        let mut stdout = io::stdout();
+        let padding = self.last_len.saturating_sub(message.len());
+        let _ = write!(stdout, "\r{}{}", message, " ".repeat(padding));
+        let _ = stdout.flush();
+        self.last_len = message.len();
+    }
+
+    fn clear(&mut self) {
+        if self.last_len == 0 {
+            return;
+        }
+
+        let mut stdout = io::stdout();
+        let _ = write!(stdout, "\r{}\r", " ".repeat(self.last_len));
+        let _ = stdout.flush();
+        self.last_len = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,7 +429,7 @@ mod tests {
         let mut training = TrainingData::new(model);
         let contents = "# comment\nuser:Who are you?\nai:I am Blip.\n\nuser:What can you do?\nassistant:I can help.\n";
 
-        training.load_conversations_from_str(contents);
+        training.load_conversations_from_str(contents, true);
 
         assert_eq!(training.num_prompts(), 2);
         assert_eq!(training.data[0].text, "user:Who are you? ai:I am Blip.");
@@ -341,7 +442,7 @@ mod tests {
         let mut training = TrainingData::new(model);
         let contents = "hello world\nplain text\n";
 
-        training.load_conversations_from_str(contents);
+        training.load_conversations_from_str(contents, true);
 
         assert_eq!(training.num_prompts(), 2);
         assert_eq!(training.data[0].text, "hello world");
