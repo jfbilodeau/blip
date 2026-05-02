@@ -21,7 +21,7 @@ use crate::nn::{
 };
 use crate::tokenizer::default_token_texts;
 use crate::version::MODEL_VERSION;
-use ndarray::{Array1, Array2};
+use ndarray::{s, Array1, Array2, Array3};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -63,8 +63,9 @@ pub struct AttentionCache {
     pub ks: Array2<f32>,
     pub vs: Array2<f32>,
     /// Per (head, query position) attention distribution over keys 0..=i.
-    /// `attn[h][i][j]` = weight from query i to key j in head h.
-    pub attn: Vec<Vec<Vec<f32>>>,
+    /// `attn[(h, i, j)]` = weight from query i to key j in head h.
+    /// Shape: (n_heads, seq_len, seq_len)
+    pub attn: Array3<f32>,
     /// Per-position concatenated context (input to W_o).
     pub context: Array2<f32>,
 }
@@ -133,7 +134,7 @@ impl SelfAttention {
             vs.row_mut(i).assign(&self.w_v.forward(&x));
         }
 
-        let mut attn: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); n]; self.n_heads];
+        let mut attn = Array3::<f32>::zeros((self.n_heads, n, n));
         let mut context = Array2::<f32>::zeros((n, dim));
         let mut scores = vec![0.0_f32; n];
 
@@ -141,12 +142,11 @@ impl SelfAttention {
             let off = h * head_dim;
             for i in 0..n {
                 // scores[j] = (q_i_h . k_j_h) * scale, for j in 0..=i (causal)
+                // Use ndarray slicing for vectorization.
                 for j in 0..=i {
-                    let mut dot = 0.0_f32;
-                    for d in 0..head_dim {
-                        dot += qs[[i, off + d]] * ks[[j, off + d]];
-                    }
-                    scores[j] = dot * scale;
+                    let q_slice = qs.slice(s![i, off..off+head_dim]);
+                    let k_slice = ks.slice(s![j, off..off+head_dim]);
+                    scores[j] = q_slice.dot(&k_slice) * scale;
                 }
                 let mut max = f32::NEG_INFINITY;
                 for &s in &scores[..=i] {
@@ -168,7 +168,10 @@ impl SelfAttention {
                         context[[i, off + d]] += w * vs[[j, off + d]];
                     }
                 }
-                attn[h][i] = scores[..=i].to_vec();
+                // Store attention weights in Array3.
+                for j in 0..=i {
+                    attn[[h, i, j]] = scores[j];
+                }
             }
         }
 
@@ -221,21 +224,22 @@ impl SelfAttention {
                 // d_attn[j] = sum_d d_context[i][off+d] * v_j[off+d]
                 // d_v[j][off+d] += attn[j] * d_context[i][off+d]
                 for j in 0..=i {
-                    let mut s = 0.0_f32;
+                    let dc_slice = d_context.slice(s![i, off..off+head_dim]);
+                    let v_slice = cache.vs.slice(s![j, off..off+head_dim]);
+                    d_attn[j] = dc_slice.dot(&v_slice);
+                    // Accumulate d_v.
+                    let attn_weight = cache.attn[[h, i, j]];
                     for d in 0..head_dim {
-                        let dc = d_context[[i, off + d]];
-                        s += dc * cache.vs[[j, off + d]];
-                        d_v[[j, off + d]] += cache.attn[h][i][j] * dc;
+                        d_v[[j, off + d]] += attn_weight * d_context[[i, off + d]];
                     }
-                    d_attn[j] = s;
                 }
                 // softmax backward
                 let mut dot = 0.0_f32;
                 for j in 0..=i {
-                    dot += cache.attn[h][i][j] * d_attn[j];
+                    dot += cache.attn[[h, i, j]] * d_attn[j];
                 }
                 for k in 0..=i {
-                    d_score[k] = cache.attn[h][i][k] * (d_attn[k] - dot);
+                    d_score[k] = cache.attn[[h, i, k]] * (d_attn[k] - dot);
                 }
                 // d_q[i][off+d] += scale * sum_k d_score[k] * k_k[off+d]
                 // d_k[k][off+d] += scale * d_score[k] * q_i[off+d]
