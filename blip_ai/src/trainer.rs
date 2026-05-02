@@ -115,6 +115,11 @@ impl TrainingData {
         self.add_prompt_internal(prompt, true);
     }
 
+    /// Add a prompt while keeping vocabulary fixed. Unknown tokens map to `<unk>`.
+    pub fn add_prompt_with_existing_vocab(&mut self, prompt: &str) {
+        self.add_prompt_internal(prompt, false);
+    }
+
     fn normalize_training_line(line: &str) -> (String, bool) {
         let trimmed = line.trim();
         let Some((role, rest)) = trimmed.split_once(':') else {

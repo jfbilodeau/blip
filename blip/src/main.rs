@@ -69,7 +69,31 @@ fn run_once(model: &Model, prompt: &str, cfg: &SamplingConfig, seed: u64) {
         model.generate_token_ids(&tokens, cfg, &mut rng)
     };
     match result {
-        Ok(ids) => println!("{}", detokenize_text(&ids, model)),
+        Ok(ids) => {
+            let text = detokenize_text(&ids, model);
+            if text.trim().is_empty() {
+                let rendered = ids
+                    .iter()
+                    .filter_map(|&id| model.get_token_by_id(id))
+                    .map(|t| {
+                        if t.chars().all(|c| c.is_whitespace()) {
+                            format!("<ws:{}>", t.chars().count())
+                        } else {
+                            t.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+
+                if rendered.is_empty() {
+                    println!("<no output>");
+                } else {
+                    println!("<blank output; generated {}>", rendered);
+                }
+            } else {
+                println!("{}", text);
+            }
+        }
         Err(e) => eprintln!("Generation failed: {}", e),
     }
 }

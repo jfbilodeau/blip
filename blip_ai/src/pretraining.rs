@@ -93,6 +93,10 @@ impl PretrainingData {
         self.data.len()
     }
 
+    pub fn sequences(&self) -> &[PretrainingSequence] {
+        &self.data
+    }
+
     /// Trim rare tokens from the vocabulary before training. Re-tokenizes all
     /// sequences so their token ids point to the new vocab.
     pub fn trim_vocab(&mut self, min_count: u32) -> usize {

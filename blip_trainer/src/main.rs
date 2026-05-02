@@ -274,8 +274,12 @@ fn main() {
             pretraining_data.num_sequences(),
             args.seq_length
         );
-        // TODO: Add pretraining to TrainingData or integrate PretrainingData with training loop
-        // For now, skip pretraining if no tuning data
+
+        training_data.clear_prompts();
+        for seq in pretraining_data.sequences() {
+            training_data.add_prompt_with_existing_vocab(&seq.text);
+        }
+        training_data.train_with_stop_mode(&cfg, StopTokenMode::NoStop);
     }
 
     training_data.clear_prompts();

@@ -1,4 +1,4 @@
-use crate::model::{Model, TOKEN_UNKNOWN};
+use crate::model::{Model, TOKEN_BEGIN, TOKEN_STOP, TOKEN_TOOL, TOKEN_UNKNOWN};
 
 #[derive(PartialEq)]
 enum TokenType {
@@ -105,14 +105,15 @@ pub fn detokenize(tokens: &[usize], model: &Model) -> String {
 }
 
 /// Detokenizer that reconstructs text by concatenating token text directly.
-/// Special `<...>` tokens are skipped.
+/// Control tokens are skipped. `<unk>` is preserved so unknown-heavy
+/// generations do not appear as blank output.
 pub fn detokenize_text(tokens: &[usize], model: &Model) -> String {
     let mut out = String::new();
     for &id in tokens {
         let Some(text) = model.get_token_by_id(id) else {
             continue;
         };
-        if text.starts_with('<') && text.ends_with('>') {
+        if matches!(text, TOKEN_BEGIN | TOKEN_STOP | TOKEN_TOOL) {
             continue;
         }
         out.push_str(text);
