@@ -258,18 +258,24 @@ fn main() {
     let _sleep_guard = SleepGuard::new();
 
     training_data.clear_prompts();
+
+    // Load pretraining data with specified sequence length.
+    let mut pretraining_data = PretrainingData::new(training_data.get_model().clone());
     for file_name in &pretraining_files {
-        if let Err(e) = training_data.load_with_existing_vocab(file_name) {
+        if let Err(e) = pretraining_data.load(file_name, args.seq_length) {
             eprintln!("Error loading pretraining data from {}: {}", file_name, e);
             return;
         }
     }
-    if training_data.num_prompts() > 0 {
+
+    if pretraining_data.num_sequences() > 0 {
         println!(
-            "Pretraining on {} prompts (without <stop>)",
-            training_data.num_prompts()
+            "Pretraining on {} sequences (avg ~{} tokens, without <stop>)",
+            pretraining_data.num_sequences(),
+            args.seq_length
         );
-        training_data.train_with_stop_mode(&cfg, StopTokenMode::NoStop);
+        // TODO: Add pretraining to TrainingData or integrate PretrainingData with training loop
+        // For now, skip pretraining if no tuning data
     }
 
     training_data.clear_prompts();
