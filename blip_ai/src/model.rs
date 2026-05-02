@@ -58,15 +58,15 @@ pub struct SelfAttention {
 }
 
 pub struct AttentionCache {
-    pub xs: Vec<Array1<f32>>,
-    pub qs: Vec<Array1<f32>>,
-    pub ks: Vec<Array1<f32>>,
-    pub vs: Vec<Array1<f32>>,
+    pub xs: Array2<f32>,
+    pub qs: Array2<f32>,
+    pub ks: Array2<f32>,
+    pub vs: Array2<f32>,
     /// Per (head, query position) attention distribution over keys 0..=i.
     /// `attn[h][i][j]` = weight from query i to key j in head h.
     pub attn: Vec<Vec<Vec<f32>>>,
     /// Per-position concatenated context (input to W_o).
-    pub context: Vec<Array1<f32>>,
+    pub context: Array2<f32>,
 }
 
 /// Per-layer KV cache for incremental generation. Stores the full key and
@@ -113,41 +113,51 @@ impl SelfAttention {
         self.dim() / self.n_heads
     }
 
-    pub fn forward(&self, xs: &[Array1<f32>]) -> Vec<Array1<f32>> {
+    pub fn forward(&self, xs: &Array2<f32>) -> Array2<f32> {
         self.forward_train(xs).0
     }
 
-    pub fn forward_train(&self, xs: &[Array1<f32>]) -> (Vec<Array1<f32>>, AttentionCache) {
+    pub fn forward_train(&self, xs: &Array2<f32>) -> (Array2<f32>, AttentionCache) {
         let dim = self.dim();
         let head_dim = self.head_dim();
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let n = xs.len();
+        let n = xs.nrows();
 
-        let qs: Vec<Array1<f32>> = xs.iter().map(|x| self.w_q.forward(x)).collect();
-        let ks: Vec<Array1<f32>> = xs.iter().map(|x| self.w_k.forward(x)).collect();
-        let vs: Vec<Array1<f32>> = xs.iter().map(|x| self.w_v.forward(x)).collect();
+        let mut qs = Array2::<f32>::zeros((n, dim));
+        let mut ks = Array2::<f32>::zeros((n, dim));
+        let mut vs = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let x = xs.row(i).to_owned();
+            qs.row_mut(i).assign(&self.w_q.forward(&x));
+            ks.row_mut(i).assign(&self.w_k.forward(&x));
+            vs.row_mut(i).assign(&self.w_v.forward(&x));
+        }
 
         let mut attn: Vec<Vec<Vec<f32>>> = vec![vec![Vec::new(); n]; self.n_heads];
-        let mut context: Vec<Array1<f32>> = vec![Array1::zeros(dim); n];
+        let mut context = Array2::<f32>::zeros((n, dim));
+        let mut scores = vec![0.0_f32; n];
 
         for h in 0..self.n_heads {
             let off = h * head_dim;
             for i in 0..n {
                 // scores[j] = (q_i_h . k_j_h) * scale, for j in 0..=i (causal)
-                let mut scores = vec![0.0_f32; i + 1];
                 for j in 0..=i {
                     let mut dot = 0.0_f32;
                     for d in 0..head_dim {
-                        dot += qs[i][off + d] * ks[j][off + d];
+                        dot += qs[[i, off + d]] * ks[[j, off + d]];
                     }
                     scores[j] = dot * scale;
                 }
-                let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                for s in &mut scores {
-                    *s = (*s - max).exp();
+                let mut max = f32::NEG_INFINITY;
+                for &s in &scores[..=i] {
+                    max = max.max(s);
                 }
-                let sum: f32 = scores.iter().sum();
-                for s in &mut scores {
+                let mut sum = 0.0_f32;
+                for s in &mut scores[..=i] {
+                    *s = (*s - max).exp();
+                    sum += *s;
+                }
+                for s in &mut scores[..=i] {
                     *s /= sum;
                 }
 
@@ -155,19 +165,23 @@ impl SelfAttention {
                 for j in 0..=i {
                     let w = scores[j];
                     for d in 0..head_dim {
-                        context[i][off + d] += w * vs[j][off + d];
+                        context[[i, off + d]] += w * vs[[j, off + d]];
                     }
                 }
-                attn[h][i] = scores;
+                attn[h][i] = scores[..=i].to_vec();
             }
         }
 
-        let outputs: Vec<Array1<f32>> = context.iter().map(|c| self.w_o.forward(c)).collect();
+        let mut outputs = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let ctx = context.row(i).to_owned();
+            outputs.row_mut(i).assign(&self.w_o.forward(&ctx));
+        }
 
         (
             outputs,
             AttentionCache {
-                xs: xs.to_vec(),
+                xs: xs.clone(),
                 qs,
                 ks,
                 vs,
@@ -179,36 +193,39 @@ impl SelfAttention {
 
     pub fn backward(
         &mut self,
-        d_outs: &[Array1<f32>],
+        d_outs: &Array2<f32>,
         cache: &AttentionCache,
-    ) -> Vec<Array1<f32>> {
+    ) -> Array2<f32> {
         let dim = self.dim();
         let head_dim = self.head_dim();
         let scale = 1.0 / (head_dim as f32).sqrt();
-        let n = d_outs.len();
+        let n = d_outs.nrows();
 
         // d_context per position via W_o backward
-        let mut d_context: Vec<Array1<f32>> = Vec::with_capacity(n);
+        let mut d_context = Array2::<f32>::zeros((n, dim));
         for i in 0..n {
-            d_context.push(self.w_o.backward(&d_outs[i], &cache.context[i]));
+            let d_out = d_outs.row(i).to_owned();
+            let ctx = cache.context.row(i).to_owned();
+            d_context.row_mut(i).assign(&self.w_o.backward(&d_out, &ctx));
         }
 
-        let mut d_q: Vec<Array1<f32>> = (0..n).map(|_| Array1::zeros(dim)).collect();
-        let mut d_k: Vec<Array1<f32>> = (0..n).map(|_| Array1::zeros(dim)).collect();
-        let mut d_v: Vec<Array1<f32>> = (0..n).map(|_| Array1::zeros(dim)).collect();
+        let mut d_q = Array2::<f32>::zeros((n, dim));
+        let mut d_k = Array2::<f32>::zeros((n, dim));
+        let mut d_v = Array2::<f32>::zeros((n, dim));
+        let mut d_attn = vec![0.0_f32; n];
+        let mut d_score = vec![0.0_f32; n];
 
         for h in 0..self.n_heads {
             let off = h * head_dim;
             for i in 0..n {
                 // d_attn[j] = sum_d d_context[i][off+d] * v_j[off+d]
                 // d_v[j][off+d] += attn[j] * d_context[i][off+d]
-                let mut d_attn = vec![0.0_f32; i + 1];
                 for j in 0..=i {
                     let mut s = 0.0_f32;
                     for d in 0..head_dim {
-                        let dc = d_context[i][off + d];
-                        s += dc * cache.vs[j][off + d];
-                        d_v[j][off + d] += cache.attn[h][i][j] * dc;
+                        let dc = d_context[[i, off + d]];
+                        s += dc * cache.vs[[j, off + d]];
+                        d_v[[j, off + d]] += cache.attn[h][i][j] * dc;
                     }
                     d_attn[j] = s;
                 }
@@ -217,7 +234,6 @@ impl SelfAttention {
                 for j in 0..=i {
                     dot += cache.attn[h][i][j] * d_attn[j];
                 }
-                let mut d_score = vec![0.0_f32; i + 1];
                 for k in 0..=i {
                     d_score[k] = cache.attn[h][i][k] * (d_attn[k] - dot);
                 }
@@ -226,19 +242,20 @@ impl SelfAttention {
                 for k in 0..=i {
                     let s_k = scale * d_score[k];
                     for d in 0..head_dim {
-                        d_q[i][off + d] += s_k * cache.ks[k][off + d];
-                        d_k[k][off + d] += s_k * cache.qs[i][off + d];
+                        d_q[[i, off + d]] += s_k * cache.ks[[k, off + d]];
+                        d_k[[k, off + d]] += s_k * cache.qs[[i, off + d]];
                     }
                 }
             }
         }
 
-        let mut d_xs: Vec<Array1<f32>> = (0..n).map(|_| Array1::zeros(dim)).collect();
+        let mut d_xs = Array2::<f32>::zeros((n, dim));
         for i in 0..n {
-            let dq = self.w_q.backward(&d_q[i], &cache.xs[i]);
-            let dk = self.w_k.backward(&d_k[i], &cache.xs[i]);
-            let dv = self.w_v.backward(&d_v[i], &cache.xs[i]);
-            d_xs[i] = dq + dk + dv;
+            let x = cache.xs.row(i).to_owned();
+            let dq = self.w_q.backward(&d_q.row(i).to_owned(), &x);
+            let dk = self.w_k.backward(&d_k.row(i).to_owned(), &x);
+            let dv = self.w_v.backward(&d_v.row(i).to_owned(), &x);
+            d_xs.row_mut(i).assign(&(dq + dk + dv));
         }
         d_xs
     }
@@ -259,9 +276,9 @@ impl SelfAttention {
         let n = cache.ks.len();
 
         let mut context = Array1::<f32>::zeros(dim);
+        let mut scores = vec![0.0_f32; n];
         for h in 0..self.n_heads {
             let off = h * head_dim;
-            let mut scores = vec![0.0_f32; n];
             for j in 0..n {
                 let mut dot = 0.0_f32;
                 for d in 0..head_dim {
@@ -328,12 +345,12 @@ pub struct DecoderBlock {
 
 pub struct DecoderBlockCache {
     pub ln1_caches: Vec<LayerNormCache>,
-    pub ln1_outs: Vec<Array1<f32>>,
+    pub ln1_outs: Array2<f32>,
     pub attn_cache: AttentionCache,
     pub attn_drop: Vec<crate::nn::DropoutCache>,
-    pub residual1: Vec<Array1<f32>>,
+    pub residual1: Array2<f32>,
     pub ln2_caches: Vec<LayerNormCache>,
-    pub ln2_outs: Vec<Array1<f32>>,
+    pub ln2_outs: Array2<f32>,
     pub ffn_caches: Vec<FeedForwardCache>,
     pub ffn_drop: Vec<crate::nn::DropoutCache>,
 }
@@ -353,58 +370,73 @@ impl DecoderBlock {
         self.dropout = p.clamp(0.0, 1.0);
     }
 
-    pub fn forward(&self, xs: &[Array1<f32>]) -> Vec<Array1<f32>> {
-        let normed1: Vec<Array1<f32>> = xs.iter().map(|x| self.ln1.forward(x)).collect();
+    pub fn forward(&self, xs: &Array2<f32>) -> Array2<f32> {
+        let n = xs.nrows();
+        let dim = xs.ncols();
+        let mut normed1 = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            normed1
+                .row_mut(i)
+                .assign(&self.ln1.forward(&xs.row(i).to_owned()));
+        }
         let attn_out = self.attn.forward(&normed1);
-        let res1: Vec<Array1<f32>> = xs.iter().zip(attn_out.iter()).map(|(x, a)| x + a).collect();
-        let normed2: Vec<Array1<f32>> = res1.iter().map(|x| self.ln2.forward(x)).collect();
-        let ffn_out: Vec<Array1<f32>> = normed2.iter().map(|x| self.ffn.forward(x)).collect();
-        res1.iter().zip(ffn_out.iter()).map(|(r, f)| r + f).collect()
+        let mut res1 = xs.clone();
+        res1 += &attn_out;
+        let mut normed2 = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            normed2
+                .row_mut(i)
+                .assign(&self.ln2.forward(&res1.row(i).to_owned()));
+        }
+        let mut ffn_out = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            ffn_out
+                .row_mut(i)
+                .assign(&self.ffn.forward(&normed2.row(i).to_owned()));
+        }
+        res1 + ffn_out
     }
 
-    pub fn forward_train(&self, xs: &[Array1<f32>]) -> (Vec<Array1<f32>>, DecoderBlockCache) {
-        let n = xs.len();
+    pub fn forward_train(&self, xs: &Array2<f32>) -> (Array2<f32>, DecoderBlockCache) {
+        let n = xs.nrows();
+        let dim = xs.ncols();
         let mut ln1_caches = Vec::with_capacity(n);
-        let mut ln1_outs = Vec::with_capacity(n);
-        for x in xs {
-            let (y, c) = self.ln1.forward_train(x);
-            ln1_outs.push(y);
+        let mut ln1_outs = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let (y, c) = self.ln1.forward_train(&xs.row(i).to_owned());
+            ln1_outs.row_mut(i).assign(&y);
             ln1_caches.push(c);
         }
         let (attn_outs_raw, attn_cache) = self.attn.forward_train(&ln1_outs);
         let mut attn_drop = Vec::with_capacity(n);
-        let mut attn_outs = Vec::with_capacity(n);
-        for a in &attn_outs_raw {
-            let (y, c) = crate::nn::dropout_forward(a, self.dropout);
-            attn_outs.push(y);
+        let mut attn_outs = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let (y, c) = crate::nn::dropout_forward(&attn_outs_raw.row(i).to_owned(), self.dropout);
+            attn_outs.row_mut(i).assign(&y);
             attn_drop.push(c);
         }
-        let residual1: Vec<Array1<f32>> =
-            xs.iter().zip(attn_outs.iter()).map(|(x, a)| x + a).collect();
+        let mut residual1 = xs.clone();
+        residual1 += &attn_outs;
 
         let mut ln2_caches = Vec::with_capacity(n);
-        let mut ln2_outs = Vec::with_capacity(n);
-        for r in &residual1 {
-            let (y, c) = self.ln2.forward_train(r);
-            ln2_outs.push(y);
+        let mut ln2_outs = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let (y, c) = self.ln2.forward_train(&residual1.row(i).to_owned());
+            ln2_outs.row_mut(i).assign(&y);
             ln2_caches.push(c);
         }
 
         let mut ffn_caches = Vec::with_capacity(n);
         let mut ffn_drop = Vec::with_capacity(n);
-        let mut ffn_outs = Vec::with_capacity(n);
-        for x in &ln2_outs {
-            let (y_raw, c_ffn) = self.ffn.forward_train(x);
+        let mut ffn_outs = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let (y_raw, c_ffn) = self.ffn.forward_train(&ln2_outs.row(i).to_owned());
             let (y, c_drop) = crate::nn::dropout_forward(&y_raw, self.dropout);
-            ffn_outs.push(y);
+            ffn_outs.row_mut(i).assign(&y);
             ffn_caches.push(c_ffn);
             ffn_drop.push(c_drop);
         }
-        let outs: Vec<Array1<f32>> = residual1
-            .iter()
-            .zip(ffn_outs.iter())
-            .map(|(r, f)| r + f)
-            .collect();
+        let outs = &residual1 + &ffn_outs;
 
         (
             outs,
@@ -424,33 +456,47 @@ impl DecoderBlock {
 
     pub fn backward(
         &mut self,
-        d_outs: &[Array1<f32>],
+        d_outs: &Array2<f32>,
         cache: &DecoderBlockCache,
-    ) -> Vec<Array1<f32>> {
-        let n = d_outs.len();
+    ) -> Array2<f32> {
+        let n = d_outs.nrows();
+        let dim = d_outs.ncols();
         // d_out flows into both branches of the FFN residual.
-        let mut d_residual1 = d_outs.to_vec();
+        let mut d_residual1 = d_outs.clone();
 
-        let mut d_ln2_out: Vec<Array1<f32>> = Vec::with_capacity(n);
+        let mut d_ln2_out = Array2::<f32>::zeros((n, dim));
         for i in 0..n {
             // backprop through FFN dropout, then FFN itself.
-            let d_ffn_raw = crate::nn::dropout_backward(&d_outs[i], &cache.ffn_drop[i]);
-            d_ln2_out.push(self.ffn.backward(&d_ffn_raw, &cache.ffn_caches[i]));
+            let d_ffn_raw =
+                crate::nn::dropout_backward(&d_outs.row(i).to_owned(), &cache.ffn_drop[i]);
+            d_ln2_out
+                .row_mut(i)
+                .assign(&self.ffn.backward(&d_ffn_raw, &cache.ffn_caches[i]));
         }
         for i in 0..n {
-            let d_r = self.ln2.backward(&d_ln2_out[i], &cache.ln2_caches[i]);
-            d_residual1[i] = &d_residual1[i] + &d_r;
+            let d_r = self
+                .ln2
+                .backward(&d_ln2_out.row(i).to_owned(), &cache.ln2_caches[i]);
+            let mut row = d_residual1.row_mut(i);
+            row += &d_r;
         }
 
         // d_residual1 flows into both branches of the attention residual.
         let mut d_x = d_residual1.clone();
-        let d_attn_out_raw: Vec<Array1<f32>> = (0..n)
-            .map(|i| crate::nn::dropout_backward(&d_residual1[i], &cache.attn_drop[i]))
-            .collect();
+        let mut d_attn_out_raw = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            d_attn_out_raw.row_mut(i).assign(&crate::nn::dropout_backward(
+                &d_residual1.row(i).to_owned(),
+                &cache.attn_drop[i],
+            ));
+        }
         let d_ln1_out = self.attn.backward(&d_attn_out_raw, &cache.attn_cache);
         for i in 0..n {
-            let d = self.ln1.backward(&d_ln1_out[i], &cache.ln1_caches[i]);
-            d_x[i] = &d_x[i] + &d;
+            let d = self
+                .ln1
+                .backward(&d_ln1_out.row(i).to_owned(), &cache.ln1_caches[i]);
+            let mut row = d_x.row_mut(i);
+            row += &d;
         }
 
         let _ = &cache.ln1_outs;
@@ -662,7 +708,31 @@ pub struct Model {
     pub lm_head: Linear,
     /// Lazily grown cache of sinusoidal positional encodings. Never serialized.
     #[serde(skip, default)]
-    pe_cache: std::cell::RefCell<Vec<Array1<f32>>>,
+    pe_cache: std::sync::RwLock<Vec<Array1<f32>>>,
+}
+
+impl Clone for Model {
+    fn clone(&self) -> Self {
+        Self {
+            version: self.version.clone(),
+            embedding_dim: self.embedding_dim,
+            depth: self.depth,
+            n_heads: self.n_heads,
+            tokens: self.tokens.clone(),
+            embeddings: self.embeddings.clone(),
+            embeddings_grad: self.embeddings_grad.clone(),
+            embeddings_state: self.embeddings_state.clone(),
+            blocks: self.blocks.clone(),
+            final_norm: self.final_norm.clone(),
+            lm_head: self.lm_head.clone(),
+            pe_cache: std::sync::RwLock::new(
+                self.pe_cache
+                    .read()
+                    .expect("pe cache read lock")
+                    .clone(),
+            ),
+        }
+    }
 }
 
 impl Model {
@@ -687,7 +757,7 @@ impl Model {
             blocks,
             final_norm: LayerNorm::new(embedding_dim),
             lm_head: Linear::new(embedding_dim, 1),
-            pe_cache: std::cell::RefCell::new(Vec::new()),
+            pe_cache: std::sync::RwLock::new(Vec::new()),
         };
 
         model.register_token(TOKEN_UNKNOWN);
@@ -840,9 +910,9 @@ impl Model {
     /// Extend `pe_cache` to cover at least `seq_len` positions. Positions
     /// already cached are never recomputed.
     fn ensure_pe(&self, seq_len: usize) {
-        let current = self.pe_cache.borrow().len();
+        let current = self.pe_cache.read().expect("pe cache read lock").len();
         if seq_len > current {
-            let mut cache = self.pe_cache.borrow_mut();
+            let mut cache = self.pe_cache.write().expect("pe cache write lock");
             // Compute only the new tail positions.
             for pos in current..seq_len {
                 let mut v = Array1::<f32>::zeros(self.embedding_dim);
@@ -861,22 +931,21 @@ impl Model {
         }
     }
 
-    fn embed_sequence(&self, ids: &[usize]) -> Vec<Array1<f32>> {
+    fn embed_sequence(&self, ids: &[usize]) -> Array2<f32> {
         self.ensure_pe(ids.len());
-        let pe = self.pe_cache.borrow();
-        ids.iter()
-            .enumerate()
-            .map(|(i, &id)| {
-                let mut v = self.embeddings.row(id).to_owned();
-                v += &pe[i];
-                v
-            })
-            .collect()
+        let pe = self.pe_cache.read().expect("pe cache read lock");
+        let mut out = Array2::<f32>::zeros((ids.len(), self.embedding_dim));
+        for (i, &id) in ids.iter().enumerate() {
+            let mut row = self.embeddings.row(id).to_owned();
+            row += &pe[i];
+            out.row_mut(i).assign(&row);
+        }
+        out
     }
 
     fn embed_token_at(&self, id: usize, pos: usize) -> Array1<f32> {
         self.ensure_pe(pos + 1);
-        let pe = self.pe_cache.borrow();
+        let pe = self.pe_cache.read().expect("pe cache read lock");
         let mut v = self.embeddings.row(id).to_owned();
         v += &pe[pos];
         v
@@ -913,8 +982,8 @@ impl Model {
         for block in &self.blocks {
             xs = block.forward(&xs);
         }
-        let last = xs.last().expect("non-empty input");
-        let normed = self.final_norm.forward(last);
+        let last = xs.row(xs.nrows() - 1).to_owned();
+        let normed = self.final_norm.forward(&last);
         self.lm_head.forward(&normed)
     }
 
@@ -936,24 +1005,25 @@ impl Model {
             block_caches.push(cache);
         }
 
-        let mut ln_caches: Vec<LayerNormCache> = Vec::with_capacity(xs.len());
-        let mut normed: Vec<Array1<f32>> = Vec::with_capacity(xs.len());
-        for x in &xs {
-            let (y, c) = self.final_norm.forward_train(x);
-            normed.push(y);
+        let n = xs.nrows();
+        let mut ln_caches: Vec<LayerNormCache> = Vec::with_capacity(n);
+        let mut normed = Array2::<f32>::zeros(xs.raw_dim());
+        for i in 0..n {
+            let (y, c) = self.final_norm.forward_train(&xs.row(i).to_owned());
+            normed.row_mut(i).assign(&y);
             ln_caches.push(c);
         }
 
-        let mut logits: Vec<Array1<f32>> = Vec::with_capacity(xs.len());
-        let mut head_caches: Vec<Array1<f32>> = Vec::with_capacity(xs.len());
-        for n in &normed {
-            let (y, c) = self.lm_head.forward_train(n);
+        let mut logits: Vec<Array1<f32>> = Vec::with_capacity(n);
+        let mut head_caches: Vec<Array1<f32>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (y, c) = self.lm_head.forward_train(&normed.row(i).to_owned());
             logits.push(y);
             head_caches.push(c);
         }
 
         let mut total_loss = 0.0_f32;
-        let mut d_logits: Vec<Array1<f32>> = Vec::with_capacity(xs.len());
+        let mut d_logits: Vec<Array1<f32>> = Vec::with_capacity(n);
         for (i, target) in targets.iter().enumerate() {
             let (loss, d) = softmax_cross_entropy(&logits[i], *target);
             total_loss += loss;
@@ -966,11 +1036,11 @@ impl Model {
             *d *= scale;
         }
 
-        let mut d_xs: Vec<Array1<f32>> = Vec::with_capacity(xs.len());
+        let mut d_xs = Array2::<f32>::zeros(xs.raw_dim());
         for i in 0..d_logits.len() {
             let d_normed = self.lm_head.backward(&d_logits[i], &head_caches[i]);
             let d_x = self.final_norm.backward(&d_normed, &ln_caches[i]);
-            d_xs.push(d_x);
+            d_xs.row_mut(i).assign(&d_x);
         }
         for (block, cache) in self.blocks.iter_mut().zip(block_caches.iter()).rev() {
             d_xs = block.backward(&d_xs, cache);
@@ -979,7 +1049,7 @@ impl Model {
         self.ensure_embeddings_grad();
         for (i, &id) in inputs.iter().enumerate() {
             let mut row = self.embeddings_grad.row_mut(id);
-            row += &d_xs[i];
+            row += &d_xs.row(i);
         }
 
         avg_loss
@@ -998,7 +1068,7 @@ impl Model {
         }
         let mut total = 0.0_f32;
         for (i, &t) in targets.iter().enumerate() {
-            let normed = self.final_norm.forward(&xs[i]);
+            let normed = self.final_norm.forward(&xs.row(i).to_owned());
             let logits = self.lm_head.forward(&normed);
             let p = softmax(&logits);
             total += -p[t].max(1e-12).ln();
@@ -1028,6 +1098,68 @@ impl Model {
         }
         self.final_norm.scale_grads(factor);
         self.lm_head.scale_grads(factor);
+    }
+
+    /// Zero every accumulated gradient tensor in the model.
+    pub fn zero_all_grads(&mut self) {
+        self.ensure_embeddings_grad();
+        self.embeddings_grad.fill(0.0);
+
+        let zero_linear = |l: &mut Linear| {
+            l.ensure_grads();
+            l.w_grad.fill(0.0);
+            l.b_grad.fill(0.0);
+        };
+        let zero_ln = |ln: &mut LayerNorm| {
+            ln.ensure_grads();
+            ln.g_grad.fill(0.0);
+            ln.b_grad.fill(0.0);
+        };
+
+        for b in &mut self.blocks {
+            zero_ln(&mut b.ln1);
+            zero_linear(&mut b.attn.w_q);
+            zero_linear(&mut b.attn.w_k);
+            zero_linear(&mut b.attn.w_v);
+            zero_linear(&mut b.attn.w_o);
+            zero_ln(&mut b.ln2);
+            zero_linear(&mut b.ffn.fc1);
+            zero_linear(&mut b.ffn.fc2);
+        }
+
+        zero_ln(&mut self.final_norm);
+        zero_linear(&mut self.lm_head);
+    }
+
+    /// Add gradients from another model with identical architecture.
+    pub fn add_grads_from(&mut self, other: &Model) {
+        self.ensure_embeddings_grad();
+        self.embeddings_grad += &other.embeddings_grad;
+
+        let add_linear = |dst: &mut Linear, src: &Linear| {
+            dst.ensure_grads();
+            dst.w_grad += &src.w_grad;
+            dst.b_grad += &src.b_grad;
+        };
+        let add_ln = |dst: &mut LayerNorm, src: &LayerNorm| {
+            dst.ensure_grads();
+            dst.g_grad += &src.g_grad;
+            dst.b_grad += &src.b_grad;
+        };
+
+        for (dst, src) in self.blocks.iter_mut().zip(other.blocks.iter()) {
+            add_ln(&mut dst.ln1, &src.ln1);
+            add_linear(&mut dst.attn.w_q, &src.attn.w_q);
+            add_linear(&mut dst.attn.w_k, &src.attn.w_k);
+            add_linear(&mut dst.attn.w_v, &src.attn.w_v);
+            add_linear(&mut dst.attn.w_o, &src.attn.w_o);
+            add_ln(&mut dst.ln2, &src.ln2);
+            add_linear(&mut dst.ffn.fc1, &src.ffn.fc1);
+            add_linear(&mut dst.ffn.fc2, &src.ffn.fc2);
+        }
+
+        add_ln(&mut self.final_norm, &other.final_norm);
+        add_linear(&mut self.lm_head, &other.lm_head);
     }
 
     /// Apply one optimizer step. If `opt` is Adam with `grad_clip = Some(c)`,

@@ -2,11 +2,12 @@ use crate::model::Model;
 use crate::nn::Optimizer;
 use crate::tokenizer::tokenize;
 use log::info;
-use std::io::{self, Write};
-use std::time::{Duration, Instant};
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha12Rng;
+use rayon::prelude::*;
+use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct TrainingPrompt {
@@ -299,15 +300,46 @@ impl TrainingData {
             indices.shuffle(&mut epoch_rng);
             let mut total_loss = 0.0_f32;
             let mut count = 0usize;
-            let mut batch_in_progress = 0usize;
             let epoch_start = Instant::now();
             let mut last_progress_update = epoch_start.checked_sub(Duration::from_secs(1)).unwrap_or(epoch_start);
+            let batch_size = cfg.batch_size.max(1);
 
-            for &idx in &indices {
-                let loss = self.model.train_sequence(&train_seqs[idx]);
-                total_loss += loss;
-                count += 1;
-                batch_in_progress += 1;
+            for batch in indices.chunks(batch_size) {
+                let template = &self.model;
+                let (batch_grads, batch_loss, batch_count) = batch
+                    .par_iter()
+                    .fold(
+                        || {
+                            let mut local = template.clone();
+                            local.zero_all_grads();
+                            (local, 0.0_f32, 0usize)
+                        },
+                        |(mut local, loss_sum, count), &idx| {
+                            let loss = local.train_sequence(&train_seqs[idx]);
+                            (local, loss_sum + loss, count + 1)
+                        },
+                    )
+                    .reduce(
+                        || {
+                            let mut local = template.clone();
+                            local.zero_all_grads();
+                            (local, 0.0_f32, 0usize)
+                        },
+                        |(mut lhs_model, lhs_loss, lhs_count), (rhs_model, rhs_loss, rhs_count)| {
+                            lhs_model.add_grads_from(&rhs_model);
+                            (lhs_model, lhs_loss + rhs_loss, lhs_count + rhs_count)
+                        },
+                    );
+
+                self.model.zero_all_grads();
+                self.model.add_grads_from(&batch_grads);
+
+                total_loss += batch_loss;
+                count += batch_count;
+
+                let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
+                self.model.apply_grads(Optimizer::adam(lr));
+                step += 1;
 
                 let should_update_progress = count == train_seqs.len()
                     || last_progress_update.elapsed() >= Duration::from_millis(250);
@@ -328,18 +360,6 @@ impl TrainingData {
                     ));
                     last_progress_update = Instant::now();
                 }
-
-                if batch_in_progress >= cfg.batch_size {
-                    let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
-                    self.model.apply_grads(Optimizer::adam(lr));
-                    batch_in_progress = 0;
-                    step += 1;
-                }
-            }
-            if batch_in_progress > 0 {
-                let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
-                self.model.apply_grads(Optimizer::adam(lr));
-                step += 1;
             }
             let train_avg = total_loss / count.max(1) as f32;
 
