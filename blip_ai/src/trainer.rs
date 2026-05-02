@@ -151,6 +151,7 @@ impl TrainingData {
             } else {
                 flush_conversation(self, &mut current_conversation);
                 current_corpus.push(normalized);
+                flush_corpus(self, &mut current_corpus);
             }
         }
 
