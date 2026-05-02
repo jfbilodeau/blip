@@ -68,7 +68,7 @@ struct TrainingArgs {
     #[arg(short = 'l', long, default_value = "0.001", help = "Adam learning rate")]
     pub learning_rate: f32,
 
-    #[arg(short = 'b', long, default_value = "16", help = "Sequences per optimizer step")]
+    #[arg(short = 'b', long, default_value = "128", help = "Sequences per optimizer step")]
     pub batch_size: usize,
 
     #[arg(long, default_value = "0.10", help = "Dropout on attention/FFN outputs during training")]

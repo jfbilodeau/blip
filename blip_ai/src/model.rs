@@ -21,7 +21,7 @@ use crate::nn::{
 };
 use crate::tokenizer::default_token_texts;
 use crate::version::MODEL_VERSION;
-use ndarray::{s, Array1, Array2, Array3};
+use ndarray::{s, Array1, Array2, Array3, ArrayView1, ArrayViewMut1};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -148,25 +148,18 @@ impl SelfAttention {
                     let k_slice = ks.slice(s![j, off..off+head_dim]);
                     scores[j] = q_slice.dot(&k_slice) * scale;
                 }
-                let mut max = f32::NEG_INFINITY;
-                for &s in &scores[..=i] {
-                    max = max.max(s);
-                }
-                let mut sum = 0.0_f32;
-                for s in &mut scores[..=i] {
-                    *s = (*s - max).exp();
-                    sum += *s;
-                }
-                for s in &mut scores[..=i] {
-                    *s /= sum;
-                }
+                let mut score_view = ArrayViewMut1::from(&mut scores[..=i]);
+                let max = score_view.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                score_view.mapv_inplace(|v| (v - max).exp());
+                let sum = score_view.sum();
+                score_view.mapv_inplace(|v| v / sum);
 
                 // ctx[h][i] = sum_j scores[j] * v_j_h
                 for j in 0..=i {
                     let w = scores[j];
-                    for d in 0..head_dim {
-                        context[[i, off + d]] += w * vs[[j, off + d]];
-                    }
+                    let v_slice = vs.slice(s![j, off..off+head_dim]);
+                    let mut ctx_slice = context.slice_mut(s![i, off..off+head_dim]);
+                    ctx_slice.scaled_add(w, &v_slice);
                 }
                 // Store attention weights in Array3.
                 for j in 0..=i {
@@ -221,34 +214,34 @@ impl SelfAttention {
         for h in 0..self.n_heads {
             let off = h * head_dim;
             for i in 0..n {
+                let dc_slice = d_context.slice(s![i, off..off+head_dim]);
+                let q_slice = cache.qs.slice(s![i, off..off+head_dim]);
                 // d_attn[j] = sum_d d_context[i][off+d] * v_j[off+d]
                 // d_v[j][off+d] += attn[j] * d_context[i][off+d]
                 for j in 0..=i {
-                    let dc_slice = d_context.slice(s![i, off..off+head_dim]);
                     let v_slice = cache.vs.slice(s![j, off..off+head_dim]);
                     d_attn[j] = dc_slice.dot(&v_slice);
                     // Accumulate d_v.
                     let attn_weight = cache.attn[[h, i, j]];
-                    for d in 0..head_dim {
-                        d_v[[j, off + d]] += attn_weight * d_context[[i, off + d]];
-                    }
+                    let mut d_v_slice = d_v.slice_mut(s![j, off..off+head_dim]);
+                    d_v_slice.scaled_add(attn_weight, &dc_slice);
                 }
                 // softmax backward
-                let mut dot = 0.0_f32;
-                for j in 0..=i {
-                    dot += cache.attn[[h, i, j]] * d_attn[j];
-                }
-                for k in 0..=i {
-                    d_score[k] = cache.attn[[h, i, k]] * (d_attn[k] - dot);
-                }
+                let attn_row = cache.attn.slice(s![h, i, 0..=i]);
+                let d_attn_view = ArrayView1::from(&d_attn[..=i]);
+                let dot = attn_row.dot(&d_attn_view);
+                let mut d_score_view = ArrayViewMut1::from(&mut d_score[..=i]);
+                d_score_view.assign(&(&attn_row * &(d_attn_view.to_owned() - dot)));
                 // d_q[i][off+d] += scale * sum_k d_score[k] * k_k[off+d]
                 // d_k[k][off+d] += scale * d_score[k] * q_i[off+d]
                 for k in 0..=i {
                     let s_k = scale * d_score[k];
-                    for d in 0..head_dim {
-                        d_q[[i, off + d]] += s_k * cache.ks[[k, off + d]];
-                        d_k[[k, off + d]] += s_k * cache.qs[[i, off + d]];
-                    }
+                    let k_slice = cache.ks.slice(s![k, off..off+head_dim]);
+                    let mut d_q_slice = d_q.slice_mut(s![i, off..off+head_dim]);
+                    d_q_slice.scaled_add(s_k, &k_slice);
+
+                    let mut d_k_slice = d_k.slice_mut(s![k, off..off+head_dim]);
+                    d_k_slice.scaled_add(s_k, &q_slice);
                 }
             }
         }
