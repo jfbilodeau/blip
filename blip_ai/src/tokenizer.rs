@@ -1,4 +1,4 @@
-use crate::model::{Model, TOKEN_AI, TOKEN_BEGIN, TOKEN_STOP, TOKEN_TOOL, TOKEN_UNKNOWN, TOKEN_USER};
+use crate::model::{Model, TOKEN_AI, TOKEN_STOP, TOKEN_TOOL, TOKEN_UNKNOWN, TOKEN_USER};
 
 #[derive(PartialEq)]
 enum TokenType {
@@ -235,7 +235,6 @@ const RECOGNIZED_SPECIALS: &[&str] = &[
     TOKEN_UNKNOWN,
     TOKEN_STOP,
     TOKEN_TOOL,
-    TOKEN_BEGIN,
     TOKEN_USER,
     TOKEN_AI,
 ];
@@ -422,7 +421,7 @@ pub fn detokenize(tokens: &[usize], model: &Model) -> String {
 }
 
 /// Detokenizer that reconstructs text by concatenating token text directly.
-/// Control tokens (`<bos>`, `<stop>`, `<tool>`, `<user>`, `<ai>`) are skipped.
+/// Control tokens (`<stop>`, `<tool>`, `<user>`, `<ai>`) are skipped.
 /// `<unk>` is preserved so unknown-heavy generations do not appear as blank
 /// output.
 pub fn detokenize_text(tokens: &[usize], model: &Model) -> String {
@@ -431,7 +430,7 @@ pub fn detokenize_text(tokens: &[usize], model: &Model) -> String {
         let Some(text) = model.get_token_by_id(id) else {
             continue;
         };
-        if matches!(text, TOKEN_BEGIN | TOKEN_STOP | TOKEN_TOOL | TOKEN_USER | TOKEN_AI) {
+        if matches!(text, TOKEN_STOP | TOKEN_TOOL | TOKEN_USER | TOKEN_AI) {
             continue;
         }
         out.push_str(text);

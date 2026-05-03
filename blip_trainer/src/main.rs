@@ -324,7 +324,7 @@ fn main() {
             // we don't re-introduce <unk> ids by re-tokenizing the joined text.
             training_data.add_prompt_tokens(seq.text.clone(), seq.tokens.clone());
         }
-        training_data.train_with_stop_mode(&pretrain_cfg, StopTokenMode::NoStop);
+        training_data.train_with_stop_mode(&pretrain_cfg, StopTokenMode::Bare);
     }
 
     training_data.clear_prompts();

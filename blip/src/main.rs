@@ -42,11 +42,10 @@ struct BlipArgs {
     pub repl: bool,
 }
 
-/// Build the inference token prompt: `[<bos>, <user>, ...user_tokens, <ai>]`.
+/// Build the inference token prompt: `[<user>, ...user_tokens, <ai>]`.
 /// Strips any literal `user:` / `ai:` prefix the user might have typed so the
 /// REPL never feeds those literal tokens into the model.
 fn build_prompt_tokens(model: &Model, prompt: &str) -> Vec<usize> {
-    let bos = model.get_begin_token_id();
     let user_tok = model.get_user_token_id();
     let ai_tok = model.get_ai_token_id();
 
@@ -59,8 +58,7 @@ fn build_prompt_tokens(model: &Model, prompt: &str) -> Vec<usize> {
         text = text[rest_offset..].trim().to_string();
     }
 
-    let mut tokens = Vec::with_capacity(prompt.len() + 4);
-    tokens.push(bos);
+    let mut tokens = Vec::with_capacity(prompt.len() + 2);
     tokens.push(user_tok);
     tokens.extend(tokenize_user_prompt(&text, model));
     tokens.push(ai_tok);
@@ -199,11 +197,10 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_starts_with_bos_user_and_ends_with_ai() {
+    fn build_prompt_starts_with_user_and_ends_with_ai() {
         let m = fresh_model();
         let toks = build_prompt_tokens(&m, "Who are you?");
-        assert_eq!(toks.first().copied(), Some(m.get_begin_token_id()));
-        assert_eq!(toks.get(1).copied(), Some(m.get_user_token_id()));
+        assert_eq!(toks.first().copied(), Some(m.get_user_token_id()));
         assert_eq!(toks.last().copied(), Some(m.get_ai_token_id()));
     }
 

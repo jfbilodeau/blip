@@ -18,13 +18,13 @@ fn train_save_load_generate_roundtrip() {
     }
     model.initialize_embeddings();
 
-    let bos = model.get_begin_token_id();
+    let user = model.get_user_token_id();
     let stop = model.get_stop_token_id();
     let a = model.get_token_id("a").unwrap();
     let b = model.get_token_id("b").unwrap();
     let c = model.get_token_id("c").unwrap();
 
-    let mut seq = vec![bos];
+    let mut seq = vec![user];
     for _ in 0..6 {
         seq.extend_from_slice(&[a, b, c]);
     }
@@ -53,11 +53,11 @@ fn train_save_load_generate_roundtrip() {
     assert_eq!(reloaded.embedding_dim(), model.embedding_dim());
     assert_eq!(reloaded.n_heads(), model.n_heads());
 
-    // Greedy generation from "<bos> a" should produce "b" first.
+    // Greedy generation from "<user> a" should produce "b" first.
     let cfg = SamplingConfig::greedy(5);
     let mut rng = ChaCha12Rng::seed_from_u64(0);
     let ids = reloaded
-        .generate_token_ids(&[bos, a], &cfg, &mut rng)
+        .generate_token_ids(&[user, a], &cfg, &mut rng)
         .expect("generate");
     assert!(!ids.is_empty(), "generation produced nothing");
     assert_eq!(
@@ -84,7 +84,6 @@ fn vocab_trim_collapses_rare_tokens_to_unk() {
     assert!(model.get_token_id("common").is_some());
     // Specials always survive.
     assert!(model.get_token_id("<unk>").is_some());
-    assert!(model.get_token_id("<bos>").is_some());
     assert!(model.get_token_id("<stop>").is_some());
 }
 

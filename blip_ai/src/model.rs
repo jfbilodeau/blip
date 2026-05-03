@@ -30,7 +30,6 @@ use std::path::Path;
 pub const TOKEN_UNKNOWN: &str = "<unk>";
 pub const TOKEN_STOP: &str = "<stop>";
 pub const TOKEN_TOOL: &str = "<tool>";
-pub const TOKEN_BEGIN: &str = "<bos>";
 pub const TOKEN_USER: &str = "<user>";
 pub const TOKEN_AI: &str = "<ai>";
 
@@ -743,14 +742,30 @@ impl Clone for Model {
 
 impl Model {
     fn is_supported_version(v: &str) -> bool {
-        // Older checkpoints lack <user>/<ai> tokens; loading them works but
-        // the REPL/tuning paths assume the new specials exist. We still allow
-        // the prior version to load so people can inspect old models.
-        matches!(v, "0.4.0" | "0.5.0" | "0.6.0" | MODEL_VERSION)
+        // Only the current version is supported. The `<bos>` token was
+        // removed in 0.8.0, which shifted token ids — older checkpoints
+        // would silently misinterpret special-token ids if loaded.
+        v == MODEL_VERSION
     }
 
     fn default_tie_embeddings() -> bool {
-        true
+        // Untied by default. Tying makes pretraining corrupt the special-token
+        // rows of the LM head (negative-class gradients flow into the shared
+        // embedding rows for `<user>`/`<ai>`/`<stop>`, which never appear as
+        // targets in the corpus). Old checkpoints that were trained tied still
+        // load fine because their lm_head.weights already mirror embeddings;
+        // they simply won't be re-tied after subsequent optimizer steps.
+        false
+    }
+
+    /// Configure whether the LM head shares parameters with the embedding
+    /// table. Must be called before [`Model::initialize_embeddings`] (or
+    /// before any training step) for the change to take effect.
+    pub fn set_tie_embeddings(&mut self, tie: bool) {
+        self.tie_embeddings = tie;
+        if tie && self.lm_head.weights.shape() == self.embeddings.shape() {
+            self.sync_lm_head_from_embeddings();
+        }
     }
 
     pub fn new(embedding_dim: usize, depth: usize, n_heads: usize) -> Self {
@@ -770,14 +785,13 @@ impl Model {
             blocks,
             final_norm: LayerNorm::new(embedding_dim),
             lm_head: Linear::new(embedding_dim, 1),
-            tie_embeddings: true,
+            tie_embeddings: Self::default_tie_embeddings(),
             pe_cache: std::sync::RwLock::new(Vec::new()),
         };
 
         model.register_token(TOKEN_UNKNOWN);
         model.register_token(TOKEN_STOP);
         model.register_token(TOKEN_TOOL);
-        model.register_token(TOKEN_BEGIN);
         model.register_token(TOKEN_USER);
         model.register_token(TOKEN_AI);
         for token in default_token_texts() {
@@ -882,9 +896,6 @@ impl Model {
     pub fn get_tool_token_id(&self) -> usize {
         self.get_token_id(TOKEN_TOOL).unwrap()
     }
-    pub fn get_begin_token_id(&self) -> usize {
-        self.get_token_id(TOKEN_BEGIN).unwrap()
-    }
     pub fn get_user_token_id(&self) -> usize {
         self.get_token_id(TOKEN_USER).unwrap()
     }
@@ -906,15 +917,15 @@ impl Model {
     }
 
     /// Drop tokens with `usage_count < min_count` from the vocabulary. Special
-    /// tokens (`<unk>`, `<stop>`, `<tool>`, `<bos>`) are always retained.
-    /// Must be called before `initialize_embeddings`. Returns the number of
-    /// tokens removed.
+    /// tokens (`<unk>`, `<stop>`, `<tool>`, `<user>`, `<ai>`) are always
+    /// retained. Must be called before `initialize_embeddings`. Returns the
+    /// number of tokens removed.
     pub fn trim_vocab(&mut self, min_count: u32) -> usize {
         if min_count <= 1 {
             return 0;
         }
         let before = self.tokens.len();
-        let specials = [TOKEN_UNKNOWN, TOKEN_STOP, TOKEN_TOOL, TOKEN_BEGIN, TOKEN_USER, TOKEN_AI];
+        let specials = [TOKEN_UNKNOWN, TOKEN_STOP, TOKEN_TOOL, TOKEN_USER, TOKEN_AI];
         self.tokens.retain(|t| {
             specials.contains(&t.text.as_str()) || t.usage_count >= min_count
         });
@@ -1470,11 +1481,11 @@ mod tests {
         }
         m.initialize_embeddings();
 
-        let bos = m.get_begin_token_id();
+        let user = m.get_user_token_id();
         let i = m.get_token_id("i").unwrap();
         let am = m.get_token_id("am").unwrap();
         let blip = m.get_token_id("blip").unwrap();
-        let prompt = vec![bos, i, am, blip];
+        let prompt = vec![user, i, am, blip];
 
         let full = m.forward_logits(&prompt);
         let mut cache = m.new_kv_cache();
@@ -1508,9 +1519,9 @@ mod tests {
         m.lm_head.bias[a] = 5.0;
 
         let cfg = SamplingConfig::greedy(1);
-        let bos = m.get_begin_token_id();
+        let user = m.get_user_token_id();
         let mut rng = ChaCha12Rng::seed_from_u64(0);
-        let ids = m.generate_token_ids(&[bos], &cfg, &mut rng).unwrap();
+        let ids = m.generate_token_ids(&[user], &cfg, &mut rng).unwrap();
         assert_eq!(ids, vec![a]);
     }
 
@@ -1521,19 +1532,20 @@ mod tests {
         for tok in ["i", "am", "blip"] {
             m.register_token(tok);
         }
+        m.set_tie_embeddings(true);
         m.initialize_embeddings();
         assert!(m.tie_embeddings);
 
         // After init, lm_head.weights mirrors the embedding table.
         assert_eq!(m.lm_head.weights, m.embeddings);
 
-        let bos = m.get_begin_token_id();
+        let user = m.get_user_token_id();
         let i = m.get_token_id("i").unwrap();
         let am = m.get_token_id("am").unwrap();
         let blip = m.get_token_id("blip").unwrap();
         let stop = m.get_stop_token_id();
 
-        let _ = m.train_sequence(&[bos, i, am, blip, stop]);
+        let _ = m.train_sequence(&[user, i, am, blip, stop]);
 
         // Both gradient buffers are non-zero before apply_grads.
         let head_grad_norm: f32 = m.lm_head.w_grad.iter().map(|v| v * v).sum();

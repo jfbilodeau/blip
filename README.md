@@ -91,19 +91,19 @@ token_id
   │       LayerNorm → FeedForward (Linear → GELU → Linear) → +residual
   │   )
   ▼ final LayerNorm
-  ▼ LM head Linear(embedding_dim → vocab_size)   # weights tied to input embeddings
+  ▼ LM head Linear(embedding_dim → vocab_size)
   ▼ softmax + cross-entropy
 ```
 
-Special tokens: `<unk>`, `<stop>`, `<tool>`, `<bos>`, `<user>`, `<ai>`. `<bos>` is prepended at
-training and inference time. Tokens are always lowercase for simplicity to
-reduce vocabulary size. The trainer runs in two phases by default:
-pretraining files are trained without appending `<stop>`, then chat-tuning
-files are trained with `<stop>` appended to each sequence. During inference,
-generation stops when `<stop>` is sampled.
+Special tokens: `<unk>`, `<stop>`, `<tool>`, `<user>`, `<ai>`. Tokens are
+always lowercase for simplicity to reduce vocabulary size. The trainer runs
+in two phases by default: pretraining files are trained as bare token
+streams (no role/control wrapping), then chat-tuning files are trained with
+`<stop>` appended to each sequence. During inference, generation stops when
+`<stop>` is sampled.
 
 Inference prompt framing uses role tokens: the runtime builds
-`[<bos>, <user>, ...prompt_tokens, <ai>]` before generation. A leading literal
+`[<user>, ...prompt_tokens, <ai>]` before generation. A leading literal
 `user:` prefix typed in REPL/CLI input is stripped before tokenization.
 
 ## Tests

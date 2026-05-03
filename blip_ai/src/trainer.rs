@@ -22,8 +22,14 @@ pub struct TrainingData {
 
 #[derive(Clone, Copy, Debug)]
 pub enum StopTokenMode {
+    /// Append `<stop>` to each prompt. Used for chat tuning so the model
+    /// learns to terminate replies.
     AppendStop,
-    NoStop,
+    /// Use the raw token stream with no `<stop>` suffix. Used for
+    /// pretraining over plain corpus so the `<stop>`, `<user>`, `<ai>`
+    /// embedding rows aren't trained on negative-class signal from
+    /// contexts they never appear in.
+    Bare,
 }
 
 /// Learning-rate schedule applied per optimizer step.
@@ -254,26 +260,23 @@ impl TrainingData {
     /// Train using next-token cross-entropy with Adam and global grad clipping.
     ///
     /// `StopTokenMode::AppendStop` appends `<stop>` to each prompt.
-    /// `StopTokenMode::NoStop` leaves prompts open-ended.
+    /// `StopTokenMode::Bare` leaves prompts as-is (no wrapping).
     pub fn train_with_stop_mode(&mut self, cfg: &TrainingConfig, stop_mode: StopTokenMode) {
-        let bos = self.model.get_begin_token_id();
         let stop = self.model.get_stop_token_id();
 
         let mut sequences: Vec<Vec<usize>> = self
             .data
             .iter()
             .map(|p| {
-                let extra = match stop_mode {
-                    StopTokenMode::AppendStop => 2,
-                    StopTokenMode::NoStop => 1,
-                };
-                let mut s = Vec::with_capacity(p.tokens.len() + extra);
-                s.push(bos);
-                s.extend_from_slice(&p.tokens);
-                if matches!(stop_mode, StopTokenMode::AppendStop) {
-                    s.push(stop);
+                match stop_mode {
+                    StopTokenMode::Bare => p.tokens.clone(),
+                    StopTokenMode::AppendStop => {
+                        let mut s = Vec::with_capacity(p.tokens.len() + 1);
+                        s.extend_from_slice(&p.tokens);
+                        s.push(stop);
+                        s
+                    }
                 }
-                s
             })
             .filter(|s| s.len() >= 2)
             .collect();
