@@ -25,7 +25,7 @@ Train with the default corpus globs (`training/pretraining/*` and `training/tuni
 
 ```pwsh
 cargo run --release -p blip_trainer -- `
-  -o models/basic.bin
+  -o models/basic.json
 ```
 
 Generate a one-shot response:
@@ -47,18 +47,24 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | `-e, --embedding-dim` | 128               | Embedding / model dimension                 |
 | `-d, --depth`     | 4                     | Number of decoder blocks                    |
 | `--n-heads`       | 4                     | Attention heads (must divide `embedding_dim`) |
-| `-n, --epochs`    | 60                    | Training epochs                             |
-| `-l, --learning-rate` | 0.001             | Adam learning rate                          |
-| `-b, --batch-size` | 16                   | Sequences per optimizer step                |
+| `--pretrain-epochs` | 4                   | Pretraining epochs over corpus data         |
+| `--pretrain-lr`   | 0.0005                | Pretraining Adam learning rate              |
+| `--pretrain-batch-size` | 128            | Pretraining sequences per optimizer step    |
+| `--pretrain-warmup` | 200                 | Pretraining warmup steps (`0` = constant LR) |
+| `--pretrain-min-lr` | 0.00001             | Pretraining cosine-decay LR floor           |
+| `-n, --epochs`    | 60                    | Chat-tuning epochs                           |
+| `-l, --learning-rate` | 0.001             | Chat-tuning Adam learning rate              |
+| `-b, --batch-size` | 128                  | Chat-tuning sequences per optimizer step    |
 | `--dropout`       | 0.10                  | Training-time dropout on attention/FFN outputs |
-| `--val-split`     | 0.10                  | Validation split fraction                   |
-| `--warmup-steps`  | 200                   | Warmup steps for cosine LR (`0` = constant LR) |
-| `--min-lr`        | 0.0001                | Final LR floor for cosine decay             |
-| `--min-count`     | 3                     | Drop tokens below this usage_count (specials always kept) |
-| `--seed`          | 42                    | RNG seed for init / shuffling               |
-| `--checkpoint-every` | 10                | Save every N epochs                         |
-| `-p, --pretraining-files` | `training/pretraining/*` | Pretraining corpus file(s), trained without `<stop>` |
-| `-t, --tuning-files`  | `training/tuning/*` | Chat-tuning file(s), trained with `<stop>` |
+| `--val-split`     | 0.10                  | Chat-tuning validation split fraction       |
+| `--warmup-steps`  | 50                    | Chat-tuning warmup steps (`0` = constant LR) |
+| `--min-lr`        | 0.0001                | Chat-tuning cosine-decay LR floor           |
+| `--seed`          | 42                    | Random seed (`0` = OS entropy)              |
+| `--checkpoint-every` | 10                | Save checkpoint every N epochs (`0` = end only) |
+| `--min-count`     | 1                     | Drop tokens below this usage_count (specials always kept) |
+| `--seq-length`    | 256                   | Target sequence length for pretraining corpus loader |
+| `-p, --pretraining-files` | `training/pretraining/*`, `training/pretraining/books/*` | Pretraining corpus file globs, trained without `<stop>` |
+| `-t, --tuning-files`  | `training/tuning/*` | Chat-tuning file globs, trained with `<stop>` |
 | `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` → JSON, else bincode) |
 
 ## Inference flags
@@ -89,12 +95,16 @@ token_id
   ▼ softmax + cross-entropy
 ```
 
-Special tokens: `<unk>`, `<stop>`, `<tool>`, `<bos>`. `<bos>` is prepended at
+Special tokens: `<unk>`, `<stop>`, `<tool>`, `<bos>`, `<user>`, `<ai>`. `<bos>` is prepended at
 training and inference time. Tokens are always lowercase for simplicity to
 reduce vocabulary size. The trainer runs in two phases by default:
 pretraining files are trained without appending `<stop>`, then chat-tuning
 files are trained with `<stop>` appended to each sequence. During inference,
 generation stops when `<stop>` is sampled.
+
+Inference prompt framing uses role tokens: the runtime builds
+`[<bos>, <user>, ...prompt_tokens, <ai>]` before generation. A leading literal
+`user:` prefix typed in REPL/CLI input is stripped before tokenization.
 
 ## Tests
 
@@ -117,6 +127,10 @@ version in-memory before saving.
 Path extension picks the format: `.json` is human-readable, anything else is
 bincode (smaller and faster). The CLI defaults to `models/basic.json` and will
 fallback to `models/basic.bin` if the JSON path is missing.
+
+When generated ids detokenize to only whitespace/control output, the inference
+CLI prints a diagnostic (`<no output>` or `<blank output; generated ...>`) so
+empty-looking generations are easier to debug.
 
 ## Limitations / roadmap
 

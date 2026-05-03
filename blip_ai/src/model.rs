@@ -31,6 +31,8 @@ pub const TOKEN_UNKNOWN: &str = "<unk>";
 pub const TOKEN_STOP: &str = "<stop>";
 pub const TOKEN_TOOL: &str = "<tool>";
 pub const TOKEN_BEGIN: &str = "<bos>";
+pub const TOKEN_USER: &str = "<user>";
+pub const TOKEN_AI: &str = "<ai>";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Token {
@@ -734,7 +736,10 @@ impl Clone for Model {
 
 impl Model {
     fn is_supported_version(v: &str) -> bool {
-        matches!(v, "0.4.0" | MODEL_VERSION)
+        // Older checkpoints lack <user>/<ai> tokens; loading them works but
+        // the REPL/tuning paths assume the new specials exist. We still allow
+        // the prior version to load so people can inspect old models.
+        matches!(v, "0.4.0" | "0.5.0" | MODEL_VERSION)
     }
 
     pub fn new(embedding_dim: usize, depth: usize, n_heads: usize) -> Self {
@@ -761,6 +766,8 @@ impl Model {
         model.register_token(TOKEN_STOP);
         model.register_token(TOKEN_TOOL);
         model.register_token(TOKEN_BEGIN);
+        model.register_token(TOKEN_USER);
+        model.register_token(TOKEN_AI);
         for token in default_token_texts() {
             model.register_token(&token);
         }
@@ -859,6 +866,12 @@ impl Model {
     pub fn get_begin_token_id(&self) -> usize {
         self.get_token_id(TOKEN_BEGIN).unwrap()
     }
+    pub fn get_user_token_id(&self) -> usize {
+        self.get_token_id(TOKEN_USER).unwrap()
+    }
+    pub fn get_ai_token_id(&self) -> usize {
+        self.get_token_id(TOKEN_AI).unwrap()
+    }
 
     pub fn register_token(&mut self, id: &str) -> usize {
         if let Some(index) = self.get_token_id(id) {
@@ -882,7 +895,7 @@ impl Model {
             return 0;
         }
         let before = self.tokens.len();
-        let specials = [TOKEN_UNKNOWN, TOKEN_STOP, TOKEN_TOOL, TOKEN_BEGIN];
+        let specials = [TOKEN_UNKNOWN, TOKEN_STOP, TOKEN_TOOL, TOKEN_BEGIN, TOKEN_USER, TOKEN_AI];
         self.tokens.retain(|t| {
             specials.contains(&t.text.as_str()) || t.usage_count >= min_count
         });

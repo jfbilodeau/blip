@@ -62,13 +62,30 @@ struct TrainingArgs {
     #[arg(long, default_value = "4", help = "Number of attention heads")]
     pub n_heads: usize,
 
-    #[arg(short = 'n', long = "epochs", default_value = "60")]
+    // ---- Pretraining-phase config -----------------------------------------
+    #[arg(long = "pretrain-epochs", default_value = "4", help = "Pretraining epochs over the corpus")]
+    pub pretrain_epochs: usize,
+
+    #[arg(long = "pretrain-lr", default_value = "0.0005", help = "Pretraining Adam learning rate")]
+    pub pretrain_lr: f32,
+
+    #[arg(long = "pretrain-batch-size", default_value = "128", help = "Pretraining sequences per optimizer step")]
+    pub pretrain_batch_size: usize,
+
+    #[arg(long = "pretrain-warmup", default_value = "200", help = "Pretraining warmup steps (0 = constant LR)")]
+    pub pretrain_warmup: usize,
+
+    #[arg(long = "pretrain-min-lr", default_value = "0.00001", help = "Pretraining cosine-decay floor")]
+    pub pretrain_min_lr: f32,
+
+    // ---- Tuning-phase config ----------------------------------------------
+    #[arg(short = 'n', long = "epochs", default_value = "60", help = "Tuning epochs over the chat dataset")]
     pub num_epochs: usize,
 
-    #[arg(short = 'l', long, default_value = "0.001", help = "Adam learning rate")]
+    #[arg(short = 'l', long, default_value = "0.001", help = "Tuning Adam learning rate")]
     pub learning_rate: f32,
 
-    #[arg(short = 'b', long, default_value = "128", help = "Sequences per optimizer step")]
+    #[arg(short = 'b', long, default_value = "128", help = "Tuning sequences per optimizer step")]
     pub batch_size: usize,
 
     #[arg(long, default_value = "0.10", help = "Dropout on attention/FFN outputs during training")]
@@ -77,10 +94,10 @@ struct TrainingArgs {
     #[arg(long, default_value = "0.10", help = "Validation split fraction (0..1)")]
     pub val_split: f32,
 
-    #[arg(long, default_value = "200", help = "Warmup steps for cosine LR schedule (0 = constant LR)")]
+    #[arg(long, default_value = "50", help = "Tuning warmup steps for cosine LR schedule (0 = constant LR)")]
     pub warmup_steps: usize,
 
-    #[arg(long, default_value = "0.0001", help = "Minimum LR reached by cosine decay after warmup")]
+    #[arg(long, default_value = "0.0001", help = "Tuning minimum LR reached by cosine decay after warmup")]
     pub min_lr: f32,
 
     #[arg(long, default_value = "42", help = "Random seed (0 = OS entropy)")]
@@ -89,7 +106,7 @@ struct TrainingArgs {
     #[arg(long, default_value = "10", help = "Save checkpoint every N epochs (0 = end only)")]
     pub checkpoint_every: usize,
 
-    #[arg(long, default_value = "3", help = "Drop tokens whose usage_count is below this (specials always kept)")]
+    #[arg(long, default_value = "1", help = "Drop tokens whose usage_count is below this (specials always kept)")]
     pub min_count: u32,
 
     #[arg(long, default_value = "256", help = "Target sequence length (tokens) for pretraining corpus loader")]
@@ -180,21 +197,27 @@ fn main() {
     }
 
     println!("Blip trainer");
-    println!(" - embedding_dim: {}", args.embedding_dim);
-    println!(" - depth:         {}", args.depth);
-    println!(" - n_heads:       {}", args.n_heads);
-    println!(" - epochs:        {}", args.num_epochs);
-    println!(" - learning_rate: {}", args.learning_rate);
-    println!(" - batch_size:    {}", args.batch_size);
-    println!(" - dropout:       {}", args.dropout);
-    println!(" - val_split:     {}", args.val_split);
-    println!(" - warmup_steps:  {}", args.warmup_steps);
-    println!(" - min_lr:        {}", args.min_lr);
-    println!(" - seed:          {}", args.seed);
-    println!(" - seq_length:    {} (pretraining)", args.seq_length);
-    println!(" - pretraining:   {:?}", pretraining_files);
-    println!(" - tuning:        {:?}", tuning_files);
-    println!(" - output:        {}", args.output_file);
+    println!(" - embedding_dim:        {}", args.embedding_dim);
+    println!(" - depth:                {}", args.depth);
+    println!(" - n_heads:              {}", args.n_heads);
+    println!(" - pretrain epochs:      {}", args.pretrain_epochs);
+    println!(" - pretrain lr:          {}", args.pretrain_lr);
+    println!(" - pretrain batch_size:  {}", args.pretrain_batch_size);
+    println!(" - pretrain warmup:      {}", args.pretrain_warmup);
+    println!(" - pretrain min_lr:      {}", args.pretrain_min_lr);
+    println!(" - tune epochs:          {}", args.num_epochs);
+    println!(" - tune learning_rate:   {}", args.learning_rate);
+    println!(" - tune batch_size:      {}", args.batch_size);
+    println!(" - tune warmup_steps:    {}", args.warmup_steps);
+    println!(" - tune min_lr:          {}", args.min_lr);
+    println!(" - dropout:              {}", args.dropout);
+    println!(" - val_split:            {}", args.val_split);
+    println!(" - seed:                 {}", args.seed);
+    println!(" - min_count:            {}", args.min_count);
+    println!(" - seq_length:           {} (pretraining)", args.seq_length);
+    println!(" - pretraining:          {:?}", pretraining_files);
+    println!(" - tuning:               {:?}", tuning_files);
+    println!(" - output:               {}", args.output_file);
     println!();
 
     let program_start = std::time::Instant::now();
@@ -233,7 +256,15 @@ fn main() {
 
     training_data.get_model_mut().initialize_embeddings();
 
-    let lr_schedule = if args.warmup_steps > 0 {
+    let pretrain_lr_schedule = if args.pretrain_warmup > 0 {
+        LrSchedule::CosineWithWarmup {
+            warmup_steps: args.pretrain_warmup,
+            min_lr: args.pretrain_min_lr,
+        }
+    } else {
+        LrSchedule::Constant
+    };
+    let tune_lr_schedule = if args.warmup_steps > 0 {
         LrSchedule::CosineWithWarmup {
             warmup_steps: args.warmup_steps,
             min_lr: args.min_lr,
@@ -242,7 +273,19 @@ fn main() {
         LrSchedule::Constant
     };
 
-    let cfg = TrainingConfig {
+    let pretrain_cfg = TrainingConfig {
+        num_epochs: args.pretrain_epochs,
+        learning_rate: args.pretrain_lr,
+        batch_size: args.pretrain_batch_size,
+        val_split: 0.0,
+        seed: args.seed,
+        checkpoint_every: args.checkpoint_every,
+        checkpoint_path: Some(args.output_file.clone()),
+        lr_schedule: pretrain_lr_schedule,
+        dropout: args.dropout,
+    };
+
+    let tune_cfg = TrainingConfig {
         num_epochs: args.num_epochs,
         learning_rate: args.learning_rate,
         batch_size: args.batch_size,
@@ -250,7 +293,7 @@ fn main() {
         seed: args.seed,
         checkpoint_every: args.checkpoint_every,
         checkpoint_path: Some(args.output_file.clone()),
-        lr_schedule,
+        lr_schedule: tune_lr_schedule,
         dropout: args.dropout,
     };
 
@@ -277,9 +320,11 @@ fn main() {
 
         training_data.clear_prompts();
         for seq in pretraining_data.sequences() {
-            training_data.add_prompt_with_existing_vocab(&seq.text);
+            // Use the pre-tokenized, <unk>-filtered token stream directly so
+            // we don't re-introduce <unk> ids by re-tokenizing the joined text.
+            training_data.add_prompt_tokens(seq.text.clone(), seq.tokens.clone());
         }
-        training_data.train_with_stop_mode(&cfg, StopTokenMode::NoStop);
+        training_data.train_with_stop_mode(&pretrain_cfg, StopTokenMode::NoStop);
     }
 
     training_data.clear_prompts();
@@ -297,7 +342,7 @@ fn main() {
         "Chat-tuning on {} prompts (with <stop>)",
         training_data.num_prompts()
     );
-    training_data.train_with_stop_mode(&cfg, StopTokenMode::AppendStop);
+    training_data.train_with_stop_mode(&tune_cfg, StopTokenMode::AppendStop);
 
     println!("Training completed in {:.2}s", train_start.elapsed().as_secs_f32());
 

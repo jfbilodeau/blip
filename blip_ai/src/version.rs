@@ -1,1 +1,1 @@
-pub const MODEL_VERSION: &str = "0.5.0";
+pub const MODEL_VERSION: &str = "0.6.0";

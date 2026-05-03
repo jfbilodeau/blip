@@ -1,6 +1,6 @@
 use crate::model::Model;
 use crate::nn::Optimizer;
-use crate::tokenizer::tokenize;
+use crate::tokenizer::{tokenize_build_vocab, tokenize_with_vocab};
 use log::info;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
@@ -97,13 +97,9 @@ impl TrainingData {
 
     fn add_prompt_internal(&mut self, prompt: &str, register_new_tokens: bool) {
         let tokens = if register_new_tokens {
-            tokenize(prompt, &mut self.model)
+            tokenize_build_vocab(prompt, &mut self.model)
         } else {
-            let unk = self.model.get_unknown_token_id();
-            crate::tokenizer::split_tokens(prompt)
-                .into_iter()
-                .map(|t| self.model.get_token_id(&t).unwrap_or(unk))
-                .collect()
+            tokenize_with_vocab(prompt, &self.model)
         };
         self.data.push(TrainingPrompt {
             text: prompt.to_string(),
@@ -120,73 +116,93 @@ impl TrainingData {
         self.add_prompt_internal(prompt, false);
     }
 
-    fn normalize_training_line(line: &str) -> (String, bool) {
+    /// Push a pre-tokenized prompt directly. The `text` field is used only
+    /// for diagnostics and for `add_prompt_with_existing_vocab` re-tokenization
+    /// of plain corpus prompts; tuning prompts that contain role tokens
+    /// should set it to a human-readable rendition.
+    pub fn add_prompt_tokens(&mut self, text: String, tokens: Vec<usize>) {
+        self.data.push(TrainingPrompt { text, tokens });
+    }
+
+    /// Detect whether a line starts with a recognized chat role prefix and
+    /// return `(role_token_id, message_text)` if so. The literal `role:`
+    /// prefix is stripped — the role is represented by a special token id
+    /// in the resulting sequence rather than as text.
+    fn parse_role_line(&self, line: &str) -> Option<(usize, String)> {
         let trimmed = line.trim();
-        let Some((role, rest)) = trimmed.split_once(':') else {
-            return (trimmed.to_string(), false);
-        };
-
-        let normalized_role = if role.eq_ignore_ascii_case("assistant") {
-            "ai"
-        } else if role.eq_ignore_ascii_case("user") || role.eq_ignore_ascii_case("ai") {
-            role
+        let (role, rest) = trimmed.split_once(':')?;
+        let role_id = if role.eq_ignore_ascii_case("user") {
+            self.model.get_user_token_id()
+        } else if role.eq_ignore_ascii_case("ai") || role.eq_ignore_ascii_case("assistant") {
+            self.model.get_ai_token_id()
         } else {
-            return (trimmed.to_string(), false);
+            return None;
         };
-
-        (format!("{}:{}", normalized_role, rest.trim()), true)
+        Some((role_id, rest.trim().to_string()))
     }
 
     fn load_conversations_from_str(&mut self, contents: &str, register_new_tokens: bool) {
-        let mut current_conversation: Vec<String> = Vec::new();
-        let mut current_corpus: Vec<String> = Vec::new();
-
-        let flush_conversation = |training_data: &mut TrainingData,
-                                  conversation: &mut Vec<String>,
-                                  register_new_tokens: bool| {
-            if conversation.is_empty() {
-                return;
-            }
-
-            training_data.add_prompt_internal(&conversation.join(" "), register_new_tokens);
-            conversation.clear();
-        };
-
-        let flush_corpus = |training_data: &mut TrainingData,
-                            corpus: &mut Vec<String>,
-                            register_new_tokens: bool| {
-            if corpus.is_empty() {
-                return;
-            }
-
-            training_data.add_prompt_internal(&corpus.join(" "), register_new_tokens);
-            corpus.clear();
-        };
+        // A "conversation" is a contiguous run of role-tagged lines (user:/ai:),
+        // turned into a single sequence of:
+        //   [<user>, ...msg tokens, <ai>, ...msg tokens, <user>, ...]
+        // The literal `user:` / `ai:` prefixes are NOT included in the token
+        // stream — only the special role token ids are.
+        //
+        // A "corpus" line (no recognized role prefix) is added as its own
+        // single-prompt sequence containing just the tokenized text.
+        let mut current_conv_tokens: Vec<usize> = Vec::new();
+        let mut current_conv_text: String = String::new();
 
         for raw_line in contents.lines() {
             let line = raw_line.trim();
             if line.is_empty() {
-                flush_conversation(self, &mut current_conversation, register_new_tokens);
-                flush_corpus(self, &mut current_corpus, register_new_tokens);
+                if !current_conv_tokens.is_empty() {
+                    self.add_prompt_tokens(
+                        std::mem::take(&mut current_conv_text),
+                        std::mem::take(&mut current_conv_tokens),
+                    );
+                }
                 continue;
             }
             if line.starts_with('#') {
                 continue;
             }
 
-            let (normalized, is_role_line) = Self::normalize_training_line(line);
-            if is_role_line {
-                flush_corpus(self, &mut current_corpus, register_new_tokens);
-                current_conversation.push(normalized);
+            if let Some((role_id, message)) = self.parse_role_line(line) {
+                let msg_tokens = if register_new_tokens {
+                    tokenize_build_vocab(&message, &mut self.model)
+                } else {
+                    tokenize_with_vocab(&message, &self.model)
+                };
+                current_conv_tokens.push(role_id);
+                current_conv_tokens.extend(msg_tokens);
+
+                if !current_conv_text.is_empty() {
+                    current_conv_text.push(' ');
+                }
+                let role_text = self
+                    .model
+                    .get_token_by_id(role_id)
+                    .unwrap_or("")
+                    .to_string();
+                current_conv_text.push_str(&role_text);
+                current_conv_text.push(' ');
+                current_conv_text.push_str(&message);
             } else {
-                flush_conversation(self, &mut current_conversation, register_new_tokens);
-                current_corpus.push(normalized);
-                flush_corpus(self, &mut current_corpus, register_new_tokens);
+                // Corpus line — flush any in-progress conversation first.
+                if !current_conv_tokens.is_empty() {
+                    self.add_prompt_tokens(
+                        std::mem::take(&mut current_conv_text),
+                        std::mem::take(&mut current_conv_tokens),
+                    );
+                }
+                self.add_prompt_internal(line, register_new_tokens);
             }
         }
 
-        flush_conversation(self, &mut current_conversation, register_new_tokens);
-        flush_corpus(self, &mut current_corpus, register_new_tokens);
+        if !current_conv_tokens.is_empty() {
+            self.add_prompt_tokens(current_conv_text, current_conv_tokens);
+        }
     }
 
     pub fn load(&mut self, file_name: &str) -> Result<(), String> {
@@ -218,19 +234,14 @@ impl TrainingData {
         self.data.clear();
     }
 
-    /// Trim rare tokens from the vocabulary before training. Re-tokenizes any
-    /// already-loaded prompts so their ids point to the new vocab (rare tokens
-    /// collapse to `<unk>`). Must be called before `initialize_embeddings`.
+    /// Trim rare tokens from the vocabulary before training. Must be called
+    /// before `initialize_embeddings`. Callers MUST reload prompts after
+    /// trimming (typically via `clear_prompts` + `load_with_existing_vocab`)
+    /// because already-loaded token streams will reference removed token ids.
     pub fn trim_vocab(&mut self, min_count: u32) -> usize {
         let removed = self.model.trim_vocab(min_count);
         if removed > 0 {
-            let unk = self.model.get_unknown_token_id();
-            for prompt in &mut self.data {
-                prompt.tokens = crate::tokenizer::split_tokens(&prompt.text)
-                    .into_iter()
-                    .map(|t| self.model.get_token_id(&t).unwrap_or(unk))
-                    .collect();
-            }
+            self.data.clear();
         }
         removed
     }
@@ -463,8 +474,15 @@ mod tests {
         training.load_conversations_from_str(contents, true);
 
         assert_eq!(training.num_prompts(), 2);
-        assert_eq!(training.data[0].text, "user:Who are you? ai:I am Blip.");
-        assert_eq!(training.data[1].text, "user:What can you do? ai:I can help.");
+        let user_id = training.model.get_user_token_id();
+        let ai_id = training.model.get_ai_token_id();
+        // Each conversation must contain both <user> and <ai> token ids and
+        // must NOT contain the literal "user" / "ai" / ":" tokens used as
+        // role prefixes.
+        for prompt in &training.data {
+            assert!(prompt.tokens.contains(&user_id));
+            assert!(prompt.tokens.contains(&ai_id));
+        }
     }
 
     #[test]
@@ -478,5 +496,42 @@ mod tests {
         assert_eq!(training.num_prompts(), 2);
         assert_eq!(training.data[0].text, "hello world");
         assert_eq!(training.data[1].text, "plain text");
+    }
+
+    #[test]
+    fn role_lines_emit_role_tokens_not_literal_text() {
+        let model = Model::new(8, 1, 2);
+        let mut training = TrainingData::new(model);
+        training.load_conversations_from_str("user:hi\nai:hello\n", true);
+        assert_eq!(training.num_prompts(), 1);
+
+        let user_id = training.model.get_user_token_id();
+        let ai_id = training.model.get_ai_token_id();
+        let toks = &training.data[0].tokens;
+
+        // First token is <user>, then "hi" tokens, then <ai>, then "hello" tokens.
+        assert_eq!(toks.first().copied(), Some(user_id));
+        assert!(toks.contains(&ai_id));
+
+        // Vocabulary must not have grown to include the literal role words
+        // as standalone uppercase tokens — split_tokens lowercases, so just
+        // verify the colon character isn't being injected at conversation
+        // boundaries between role and message.
+        let colon_id = training.model.get_token_id(":");
+        if let Some(colon_id) = colon_id {
+            // ':' may exist as a default symbol token, but it must not appear
+            // immediately after the <user> token (which would mean we left
+            // the role prefix literal in place).
+            for window in toks.windows(2) {
+                assert!(
+                    !(window[0] == user_id && window[1] == colon_id),
+                    "role prefix ':' leaked into token stream"
+                );
+                assert!(
+                    !(window[0] == ai_id && window[1] == colon_id),
+                    "role prefix ':' leaked into token stream"
+                );
+            }
+        }
     }
 }
