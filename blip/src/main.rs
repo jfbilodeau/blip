@@ -1,5 +1,5 @@
 use blip_ai::model::{Model, SamplingConfig};
-use blip_ai::tokenizer::{detokenize_text, tokenize_with_vocab};
+use blip_ai::tokenizer::{detokenize_text, tokenize_user_prompt};
 use clap::Parser;
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
@@ -62,7 +62,7 @@ fn build_prompt_tokens(model: &Model, prompt: &str) -> Vec<usize> {
     let mut tokens = Vec::with_capacity(prompt.len() + 4);
     tokens.push(bos);
     tokens.push(user_tok);
-    tokens.extend(tokenize_with_vocab(&text, model));
+    tokens.extend(tokenize_user_prompt(&text, model));
     tokens.push(ai_tok);
     tokens
 }

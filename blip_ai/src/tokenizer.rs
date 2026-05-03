@@ -358,6 +358,61 @@ pub fn tokenize_with_vocab_and_specials(text: &str, model: &Model) -> Vec<usize>
     ids
 }
 
+/// Tokenize a *user prompt* against a frozen vocabulary using greedy
+/// longest-prefix decomposition.
+///
+/// Each piece produced by [`split_tokens`] is first looked up whole; if it
+/// is in the vocab, that single id is emitted. Otherwise the piece is
+/// scanned left-to-right and at each position the longest prefix that
+/// exists in the vocab is consumed. Single characters never present in the
+/// vocab map to `<unk>`.
+///
+/// Examples (assuming default vocab + the words "does", "not", "exist"):
+///   * `"doesnotexist"` -> `["does", "not", "exist"]`
+///   * `"abc"`          -> `["a", "b", "c"]` (single ASCII letters always
+///                         exist in the default vocab)
+///   * `"hello"`        -> `["hello"]` if registered, else `["h", "e", "l",
+///                         "l", "o"]`
+pub fn tokenize_user_prompt(text: &str, model: &Model) -> Vec<usize> {
+    let unk = model.get_unknown_token_id();
+    let mut ids = Vec::new();
+    for piece in split_tokens(text) {
+        // Common case: the whole piece is one vocab token.
+        if let Some(id) = model.get_token_id(&piece) {
+            ids.push(id);
+            continue;
+        }
+        // Otherwise greedily consume the longest prefix that exists in
+        // the vocabulary at each position. The default vocab includes all
+        // single ASCII letters, digits, and DEFAULT_SYMBOLS, so a single-
+        // char fallback nearly always succeeds; anything that doesn't
+        // resolve maps to `<unk>`.
+        let chars: Vec<char> = piece.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let mut matched: Option<(usize, usize)> = None;
+            for end in (i + 1..=chars.len()).rev() {
+                let candidate: String = chars[i..end].iter().collect();
+                if let Some(id) = model.get_token_id(&candidate) {
+                    matched = Some((id, end));
+                    break;
+                }
+            }
+            match matched {
+                Some((id, end)) => {
+                    ids.push(id);
+                    i = end;
+                }
+                None => {
+                    ids.push(unk);
+                    i += 1;
+                }
+            }
+        }
+    }
+    ids
+}
+
 pub fn detokenize(tokens: &[usize], model: &Model) -> String {
     tokens
         .iter()
@@ -512,10 +567,58 @@ mod tests {
     #[test]
     fn specials_aware_emits_role_tokens_inline() {
         let mut model = Model::new(8, 1, 2);
-        let ids = tokenize_build_vocab_with_specials("<user> hi <ai> hello", &mut model);
+        let ids = tokenize_build_vocab_with_specials("<user>hi<ai>hello", &mut model);
         let user = model.get_user_token_id();
         let ai = model.get_ai_token_id();
         assert_eq!(ids.first().copied(), Some(user));
         assert!(ids.contains(&ai));
+    }
+
+    #[test]
+    fn user_prompt_decomposes_unknown_word_into_known_subwords() {
+        let mut model = Model::new(8, 1, 2);
+        for w in ["does", "not", "exist"] {
+            tokenize_build_vocab(w, &mut model);
+        }
+        let ids = tokenize_user_prompt("doesnotexist", &model);
+        let does = model.get_token_id("does").unwrap();
+        let not = model.get_token_id("not").unwrap();
+        let exist = model.get_token_id("exist").unwrap();
+        assert_eq!(ids, vec![does, not, exist]);
+    }
+
+    #[test]
+    fn user_prompt_falls_back_to_single_chars_for_unknown_word() {
+        // Default vocab includes all single ASCII letters, so an unknown
+        // word like "abc" decomposes into ['a', 'b', 'c'].
+        let model = Model::new(8, 1, 2);
+        let ids = tokenize_user_prompt("abc", &model);
+        let a = model.get_token_id("a").unwrap();
+        let b = model.get_token_id("b").unwrap();
+        let c = model.get_token_id("c").unwrap();
+        assert_eq!(ids, vec![a, b, c]);
+    }
+
+    #[test]
+    fn user_prompt_prefers_whole_word_when_present() {
+        let mut model = Model::new(8, 1, 2);
+        tokenize_build_vocab("hello", &mut model);
+        let ids = tokenize_user_prompt("hello", &model);
+        let hello = model.get_token_id("hello").unwrap();
+        assert_eq!(ids, vec![hello]);
+    }
+
+    #[test]
+    fn user_prompt_picks_longest_matching_prefix() {
+        let mut model = Model::new(8, 1, 2);
+        // Register both "do" and "does" so greedy longest-match must pick
+        // "does" rather than "do" + "es".
+        for w in ["do", "does", "not"] {
+            tokenize_build_vocab(w, &mut model);
+        }
+        let ids = tokenize_user_prompt("doesnot", &model);
+        let does = model.get_token_id("does").unwrap();
+        let not = model.get_token_id("not").unwrap();
+        assert_eq!(ids, vec![does, not]);
     }
 }
