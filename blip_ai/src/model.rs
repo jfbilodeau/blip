@@ -705,6 +705,12 @@ pub struct Model {
     pub blocks: Vec<DecoderBlock>,
     pub final_norm: LayerNorm,
     pub lm_head: Linear,
+    /// When true, `lm_head.weights` is kept equal to `embeddings` and only
+    /// the LM-head bias is an independent parameter. Defaults to true; old
+    /// checkpoints without the field are also treated as tied so their
+    /// in-memory `lm_head.weights` becomes a mirror of `embeddings` on load.
+    #[serde(default = "Model::default_tie_embeddings")]
+    pub tie_embeddings: bool,
     /// Lazily grown cache of sinusoidal positional encodings. Never serialized.
     #[serde(skip, default)]
     pe_cache: std::sync::RwLock<Vec<Array1<f32>>>,
@@ -724,6 +730,7 @@ impl Clone for Model {
             blocks: self.blocks.clone(),
             final_norm: self.final_norm.clone(),
             lm_head: self.lm_head.clone(),
+            tie_embeddings: self.tie_embeddings,
             pe_cache: std::sync::RwLock::new(
                 self.pe_cache
                     .read()
@@ -739,7 +746,11 @@ impl Model {
         // Older checkpoints lack <user>/<ai> tokens; loading them works but
         // the REPL/tuning paths assume the new specials exist. We still allow
         // the prior version to load so people can inspect old models.
-        matches!(v, "0.4.0" | "0.5.0" | MODEL_VERSION)
+        matches!(v, "0.4.0" | "0.5.0" | "0.6.0" | MODEL_VERSION)
+    }
+
+    fn default_tie_embeddings() -> bool {
+        true
     }
 
     pub fn new(embedding_dim: usize, depth: usize, n_heads: usize) -> Self {
@@ -759,6 +770,7 @@ impl Model {
             blocks,
             final_norm: LayerNorm::new(embedding_dim),
             lm_head: Linear::new(embedding_dim, 1),
+            tie_embeddings: true,
             pe_cache: std::sync::RwLock::new(Vec::new()),
         };
 
@@ -820,6 +832,13 @@ impl Model {
         // Normalize compatible checkpoints to the current version when loaded.
         model.version = MODEL_VERSION.to_string();
         model.embeddings_grad = Array2::zeros(model.embeddings.raw_dim());
+        // Re-tie the LM head from the embedding table. For old checkpoints
+        // that trained with an independent head this discards the previously
+        // learned head weights, but going forward the model is tied. The
+        // bias term is preserved.
+        if model.tie_embeddings {
+            model.sync_lm_head_from_embeddings();
+        }
         Ok(model)
     }
 
@@ -909,6 +928,17 @@ impl Model {
         self.embeddings_grad = Array2::zeros((vocab, self.embedding_dim));
         self.embeddings_state = AdamState2::default();
         self.lm_head = Linear::new(self.embedding_dim, vocab);
+        if self.tie_embeddings {
+            self.sync_lm_head_from_embeddings();
+        }
+    }
+
+    /// Copy `embeddings` into `lm_head.weights` so the head shares parameters
+    /// with the input embedding table. The head bias is left untouched.
+    pub fn sync_lm_head_from_embeddings(&mut self) {
+        if self.lm_head.weights.shape() == self.embeddings.shape() {
+            self.lm_head.weights.assign(&self.embeddings);
+        }
     }
 
     fn ensure_embeddings_grad(&mut self) {
@@ -1175,6 +1205,19 @@ impl Model {
     /// Apply one optimizer step. If `opt` is Adam with `grad_clip = Some(c)`,
     /// global L2 norm is clipped to `c` before stepping.
     pub fn apply_grads(&mut self, opt: Optimizer) {
+        // With tied embeddings, the LM head's weight gradient is the gradient
+        // w.r.t. the *shared* embedding matrix. Fold it into `embeddings_grad`
+        // before clipping, then zero `lm_head.w_grad` so the head's own
+        // optimizer step only updates the bias.
+        if self.tie_embeddings {
+            self.ensure_embeddings_grad();
+            self.lm_head.ensure_grads();
+            if self.lm_head.w_grad.shape() == self.embeddings_grad.shape() {
+                self.embeddings_grad += &self.lm_head.w_grad;
+                self.lm_head.w_grad.fill(0.0);
+            }
+        }
+
         if let Optimizer::Adam {
             grad_clip: Some(c), ..
         } = opt
@@ -1226,6 +1269,13 @@ impl Model {
         }
         self.final_norm.apply_grads(opt);
         self.lm_head.apply_grads(opt);
+
+        // Re-tie: keep the LM head's weight matrix equal to the (now updated)
+        // embeddings. The head's own weight gradient was zeroed above, so its
+        // Adam state for the weight matrix never moves.
+        if self.tie_embeddings {
+            self.sync_lm_head_from_embeddings();
+        }
     }
 
     // -- generation -----------------------------------------------------------
@@ -1462,5 +1512,41 @@ mod tests {
         let mut rng = ChaCha12Rng::seed_from_u64(0);
         let ids = m.generate_token_ids(&[bos], &cfg, &mut rng).unwrap();
         assert_eq!(ids, vec![a]);
+    }
+
+    #[test]
+    fn tied_embeddings_keep_lm_head_in_sync_after_step() {
+        crate::nn::seed(7);
+        let mut m = Model::new(8, 1, 2);
+        for tok in ["i", "am", "blip"] {
+            m.register_token(tok);
+        }
+        m.initialize_embeddings();
+        assert!(m.tie_embeddings);
+
+        // After init, lm_head.weights mirrors the embedding table.
+        assert_eq!(m.lm_head.weights, m.embeddings);
+
+        let bos = m.get_begin_token_id();
+        let i = m.get_token_id("i").unwrap();
+        let am = m.get_token_id("am").unwrap();
+        let blip = m.get_token_id("blip").unwrap();
+        let stop = m.get_stop_token_id();
+
+        let _ = m.train_sequence(&[bos, i, am, blip, stop]);
+
+        // Both gradient buffers are non-zero before apply_grads.
+        let head_grad_norm: f32 = m.lm_head.w_grad.iter().map(|v| v * v).sum();
+        let emb_grad_norm: f32 = m.embeddings_grad.iter().map(|v| v * v).sum();
+        assert!(head_grad_norm > 0.0, "lm_head should have weight grads");
+        assert!(emb_grad_norm > 0.0, "embeddings should have grads");
+
+        m.apply_grads(crate::nn::Optimizer::adam(0.01));
+
+        // After the step, lm_head.weights still equals embeddings (re-tied),
+        // and the head weight grad has been folded in / zeroed.
+        assert_eq!(m.lm_head.weights, m.embeddings);
+        let head_grad_after: f32 = m.lm_head.w_grad.iter().map(|v| v * v).sum();
+        assert_eq!(head_grad_after, 0.0);
     }
 }

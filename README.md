@@ -91,7 +91,7 @@ token_id
   │       LayerNorm → FeedForward (Linear → GELU → Linear) → +residual
   │   )
   ▼ final LayerNorm
-  ▼ LM head Linear(embedding_dim → vocab_size)
+  ▼ LM head Linear(embedding_dim → vocab_size)   # weights tied to input embeddings
   ▼ softmax + cross-entropy
 ```
 
@@ -135,7 +135,6 @@ empty-looking generations are easier to debug.
 ## Limitations / roadmap
 
 - Word-level tokenizer (with contractions), still no BPE.
-- Tied embeddings are not implemented yet.
 - No dropout in attention weights (only on attn/FFN outputs).
 
 These are the natural next things to add.

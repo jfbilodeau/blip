@@ -1,6 +1,6 @@
 use crate::model::Model;
 use crate::nn::Optimizer;
-use crate::tokenizer::{tokenize_build_vocab, tokenize_with_vocab};
+use crate::tokenizer::{tokenize_build_vocab_with_specials, tokenize_with_vocab_and_specials};
 use log::info;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
@@ -97,9 +97,9 @@ impl TrainingData {
 
     fn add_prompt_internal(&mut self, prompt: &str, register_new_tokens: bool) {
         let tokens = if register_new_tokens {
-            tokenize_build_vocab(prompt, &mut self.model)
+            tokenize_build_vocab_with_specials(prompt, &mut self.model)
         } else {
-            tokenize_with_vocab(prompt, &self.model)
+            tokenize_with_vocab_and_specials(prompt, &self.model)
         };
         self.data.push(TrainingPrompt {
             text: prompt.to_string(),
@@ -170,9 +170,9 @@ impl TrainingData {
 
             if let Some((role_id, message)) = self.parse_role_line(line) {
                 let msg_tokens = if register_new_tokens {
-                    tokenize_build_vocab(&message, &mut self.model)
+                    tokenize_build_vocab_with_specials(&message, &mut self.model)
                 } else {
-                    tokenize_with_vocab(&message, &self.model)
+                    tokenize_with_vocab_and_specials(&message, &self.model)
                 };
                 current_conv_tokens.push(role_id);
                 current_conv_tokens.extend(msg_tokens);

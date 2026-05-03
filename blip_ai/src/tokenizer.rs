@@ -222,6 +222,142 @@ pub fn tokenize_for_inference(text: &str, model: &Model) -> Vec<usize> {
     tokenize_with_vocab(text, model)
 }
 
+// ---------------------------------------------------------------------------
+// Special-token-aware tokenization (used by tuning data loader)
+// ---------------------------------------------------------------------------
+
+/// The literal special-token names the tuning loader recognizes inline. A
+/// match is emitted as a single special-token id; prefix the literal with a
+/// backslash (`\<unk>`) to escape — the backslash is dropped and the rest
+/// tokenizes through the normal pipeline (so `<`, `unk`, `>` come out as
+/// three ordinary tokens).
+const RECOGNIZED_SPECIALS: &[&str] = &[
+    TOKEN_UNKNOWN,
+    TOKEN_STOP,
+    TOKEN_TOOL,
+    TOKEN_BEGIN,
+    TOKEN_USER,
+    TOKEN_AI,
+];
+
+/// One chunk produced by `split_with_specials`: either a literal special
+/// token name to be emitted as a single id, or a run of plain text to be
+/// fed through `split_tokens`.
+enum SpecialChunk<'a> {
+    Special(&'a str),
+    Plain(String),
+}
+
+/// Scan `text` left-to-right, splitting on recognized special-token literals
+/// (`<unk>`, `<stop>`, `<tool>`, `<bos>`, `<user>`, `<ai>`). A backslash
+/// immediately before such a literal escapes it: the backslash is removed
+/// and the literal is returned as plain text. Other backslashes are
+/// preserved verbatim.
+fn split_with_specials(text: &str) -> Vec<SpecialChunk<'_>> {
+    let bytes = text.as_bytes();
+    let mut out: Vec<SpecialChunk<'_>> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Escaped special: `\<name>` -> drop backslash, emit literal as plain.
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'<' {
+            if let Some(name) = match_special_at(text, i + 1) {
+                plain.push_str(name);
+                i += 1 + name.len();
+                continue;
+            }
+            // Lone `\<` that is not followed by a recognized special: keep
+            // the backslash literally and let the `<` start normal text.
+            plain.push('\\');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'<' {
+            if let Some(name) = match_special_at(text, i) {
+                if !plain.is_empty() {
+                    out.push(SpecialChunk::Plain(std::mem::take(&mut plain)));
+                }
+                out.push(SpecialChunk::Special(name));
+                i += name.len();
+                continue;
+            }
+        }
+        // Plain byte. Push as a char (text is &str so byte i is a char start
+        // unless we're inside a multi-byte sequence — handle that by walking
+        // chars when the byte isn't ASCII).
+        if bytes[i] < 0x80 {
+            plain.push(bytes[i] as char);
+            i += 1;
+        } else {
+            let rest = &text[i..];
+            let c = rest.chars().next().unwrap();
+            plain.push(c);
+            i += c.len_utf8();
+        }
+    }
+    if !plain.is_empty() {
+        out.push(SpecialChunk::Plain(plain));
+    }
+    out
+}
+
+/// If `text[at..]` starts with one of the recognized special-token literals,
+/// return that literal (with its angle brackets). Comparison is exact and
+/// case-sensitive to match how specials are stored in the vocabulary.
+fn match_special_at(text: &str, at: usize) -> Option<&'static str> {
+    let rest = &text[at..];
+    for &name in RECOGNIZED_SPECIALS {
+        if rest.starts_with(name) {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Like [`tokenize_build_vocab`], but recognizes literal special-token names
+/// (`<unk>`, `<stop>`, `<tool>`, `<bos>`, `<user>`, `<ai>`) and emits each
+/// as the corresponding special-token id. Prefix with a backslash to
+/// escape (`\<unk>` becomes the three ordinary tokens `<`, `unk`, `>`).
+///
+/// Specials map to ids the model already has registered (those ids are
+/// created in `Model::new`); plain text runs go through the normal
+/// vocabulary-building tokenizer.
+pub fn tokenize_build_vocab_with_specials(text: &str, model: &mut Model) -> Vec<usize> {
+    let mut ids = Vec::new();
+    for chunk in split_with_specials(text) {
+        match chunk {
+            SpecialChunk::Special(name) => {
+                if let Some(id) = model.get_token_id(name) {
+                    ids.push(id);
+                }
+            }
+            SpecialChunk::Plain(s) => {
+                ids.extend(tokenize_build_vocab(&s, model));
+            }
+        }
+    }
+    ids
+}
+
+/// Like [`tokenize_with_vocab`], but recognizes literal special-token names
+/// (`<unk>`, `<stop>`, etc.) and emits each as the corresponding special-token
+/// id. Prefix with a backslash to escape.
+pub fn tokenize_with_vocab_and_specials(text: &str, model: &Model) -> Vec<usize> {
+    let unk = model.get_unknown_token_id();
+    let mut ids = Vec::new();
+    for chunk in split_with_specials(text) {
+        match chunk {
+            SpecialChunk::Special(name) => {
+                ids.push(model.get_token_id(name).unwrap_or(unk));
+            }
+            SpecialChunk::Plain(s) => {
+                ids.extend(tokenize_with_vocab(&s, model));
+            }
+        }
+    }
+    ids
+}
+
 pub fn detokenize(tokens: &[usize], model: &Model) -> String {
     tokens
         .iter()
@@ -331,5 +467,55 @@ mod tests {
         assert_eq!(ids[2], unk);
         assert_ne!(ids[3], unk);
         assert_eq!(ids[4], unk);
+    }
+
+    #[test]
+    fn specials_aware_maps_literal_specials_to_special_ids() {
+        let mut model = Model::new(8, 1, 2);
+        tokenize_build_vocab("hi there", &mut model);
+
+        let ids = tokenize_with_vocab_and_specials("hi <stop> there", &model);
+        let stop = model.get_stop_token_id();
+        // Plain split: "hi" " " "<stop>" " " "there" — but the special is one id.
+        // Around the special, the surrounding spaces tokenize as single space tokens.
+        assert!(ids.contains(&stop));
+        // The literal "<stop>" must NOT appear as a sequence of "<", "stop", ">".
+        let lt = model.get_token_id("<").unwrap_or(usize::MAX);
+        let gt = model.get_token_id(">").unwrap_or(usize::MAX);
+        // No `<` `stop` `>` sequence should appear (we don't even register "stop"
+        // as a plain word here, so this is mostly a structural check).
+        for w in ids.windows(3) {
+            assert!(!(w[0] == lt && w[2] == gt), "literal <stop> leaked through");
+        }
+    }
+
+    #[test]
+    fn specials_aware_escapes_with_backslash() {
+        let mut model = Model::new(8, 1, 2);
+        // Build vocab using the specials-aware path so escaped `<unk>` registers
+        // its component tokens (`<`, `unk`, `>`) into the vocab.
+        let escaped_ids = tokenize_build_vocab_with_specials("\\<unk>", &mut model);
+        let unk = model.get_unknown_token_id();
+        // Escaped form must NOT collapse to a single <unk> token.
+        assert_ne!(escaped_ids, vec![unk]);
+        // It should produce three plain tokens: `<`, `unk`, `>`.
+        let lt = model.get_token_id("<").expect("'<' should be in vocab");
+        let unk_word = model.get_token_id("unk").expect("'unk' should be in vocab");
+        let gt = model.get_token_id(">").expect("'>' should be in vocab");
+        assert_eq!(escaped_ids, vec![lt, unk_word, gt]);
+
+        // And the unescaped form maps to the single special id.
+        let plain_ids = tokenize_with_vocab_and_specials("<unk>", &model);
+        assert_eq!(plain_ids, vec![unk]);
+    }
+
+    #[test]
+    fn specials_aware_emits_role_tokens_inline() {
+        let mut model = Model::new(8, 1, 2);
+        let ids = tokenize_build_vocab_with_specials("<user> hi <ai> hello", &mut model);
+        let user = model.get_user_token_id();
+        let ai = model.get_ai_token_id();
+        assert_eq!(ids.first().copied(), Some(user));
+        assert!(ids.contains(&ai));
     }
 }
