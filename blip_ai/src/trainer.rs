@@ -352,8 +352,13 @@ impl TrainingData {
                     let percent = (count as f32 / train_seqs.len().max(1) as f32) * 100.0;
                     let avg_loss = total_loss / count.max(1) as f32;
                     let current_lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
+                    let elapsed = epoch_start.elapsed();
+                    let elapsed_secs = elapsed.as_secs_f32();
+                    let seqs_per_sec = (count as f32 / elapsed_secs.max(1e-6)).max(1e-6);
+                    let remaining = train_seqs.len().saturating_sub(count);
+                    let eta_secs = remaining as f32 / seqs_per_sec;
                     progress_line.print(&format!(
-                        "Epoch {}/{} [{:>5.1}%] {}/{} seq - avg loss {:.4} - lr {:.6} - {:.1}s",
+                        "Epoch {}/{} [{:>5.1}%] {}/{} seq - avg loss {:.4} - lr {:.6} - elapsed {:.1}s - eta {:.1}s",
                         epoch + 1,
                         cfg.num_epochs,
                         percent,
@@ -361,7 +366,8 @@ impl TrainingData {
                         train_seqs.len(),
                         avg_loss,
                         current_lr,
-                        epoch_start.elapsed().as_secs_f32()
+                        elapsed_secs,
+                        eta_secs
                     ));
                     last_progress_update = Instant::now();
                 }
