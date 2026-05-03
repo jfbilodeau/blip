@@ -31,7 +31,7 @@ cargo run --release -p blip_trainer -- `
 Generate a one-shot response:
 
 ```pwsh
-cargo run --release -p blip -- --repl false -p "I am" -m 32 -t 0.8 --seed 1
+cargo run --release -p blip -- --repl false -p "Who are you?" -m 32 -t 0.8 --seed 1
 ```
 
 REPL:
@@ -90,7 +90,8 @@ token_id
 ```
 
 Special tokens: `<unk>`, `<stop>`, `<tool>`, `<bos>`. `<bos>` is prepended at
-training and inference time. The trainer runs in two phases by default:
+training and inference time. Tokens are always lowercase for simplicity to
+reduce vocabulary size. The trainer runs in two phases by default:
 pretraining files are trained without appending `<stop>`, then chat-tuning
 files are trained with `<stop>` appended to each sequence. During inference,
 generation stops when `<stop>` is sampled.
