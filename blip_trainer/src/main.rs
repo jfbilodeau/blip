@@ -1,4 +1,4 @@
-use blip_ai::model::Model;
+use blip_ai::model::{Model, TrainingMetadata};
 use blip_ai::nn;
 use blip_ai::pretraining::PretrainingData;
 use blip_ai::trainer::{LrSchedule, StopTokenMode, TrainingConfig, TrainingData};
@@ -229,7 +229,33 @@ fn main() {
 
     let program_start = std::time::Instant::now();
 
-    let model = Model::new(args.embedding_dim, args.depth, args.n_heads);
+    let mut model = Model::new(args.embedding_dim, args.depth, args.n_heads);
+    model.set_training_metadata(TrainingMetadata {
+        embedding_dim: args.embedding_dim,
+        depth: args.depth,
+        n_heads: args.n_heads,
+        pretrain_epochs: args.pretrain_epochs,
+        pretrain_lr: args.pretrain_lr,
+        pretrain_batch_size: args.pretrain_batch_size,
+        pretrain_warmup: args.pretrain_warmup,
+        pretrain_min_lr: args.pretrain_min_lr,
+        num_epochs: args.num_epochs,
+        learning_rate: args.learning_rate,
+        batch_size: args.batch_size,
+        dropout: args.dropout,
+        val_split: args.val_split,
+        warmup_steps: args.warmup_steps,
+        min_lr: args.min_lr,
+        grad_clip: args.grad_clip,
+        deterministic: args.deterministic,
+        seed: args.seed,
+        checkpoint_every: args.checkpoint_every,
+        min_count: args.min_count,
+        seq_length: args.seq_length,
+        pretraining_files: pretraining_files.clone(),
+        tuning_files: tuning_files.clone(),
+        output_file: args.output_file.clone(),
+    });
     let mut training_data = TrainingData::new(model);
 
     // Build vocabulary from pretraining data first, so min_count pruning applies

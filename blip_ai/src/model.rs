@@ -597,6 +597,34 @@ fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &
     probs.len() - 1
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TrainingMetadata {
+    pub embedding_dim: usize,
+    pub depth: usize,
+    pub n_heads: usize,
+    pub pretrain_epochs: usize,
+    pub pretrain_lr: f32,
+    pub pretrain_batch_size: usize,
+    pub pretrain_warmup: usize,
+    pub pretrain_min_lr: f32,
+    pub num_epochs: usize,
+    pub learning_rate: f32,
+    pub batch_size: usize,
+    pub dropout: f32,
+    pub val_split: f32,
+    pub warmup_steps: usize,
+    pub min_lr: f32,
+    pub grad_clip: f32,
+    pub deterministic: bool,
+    pub seed: u64,
+    pub checkpoint_every: usize,
+    pub min_count: u32,
+    pub seq_length: usize,
+    pub pretraining_files: Vec<String>,
+    pub tuning_files: Vec<String>,
+    pub output_file: String,
+}
+
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -619,6 +647,8 @@ pub struct Model {
     pub blocks: Vec<DecoderBlock>,
     pub final_norm: LayerNorm,
     pub lm_head: Linear,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_metadata: Option<TrainingMetadata>,
     /// Lazily grown cache of sinusoidal positional encodings. Never serialized.
     #[serde(skip, default)]
     pe_cache: std::sync::RwLock<Vec<Array1<f32>>>,
@@ -639,6 +669,7 @@ impl Clone for Model {
             blocks: self.blocks.clone(),
             final_norm: self.final_norm.clone(),
             lm_head: self.lm_head.clone(),
+            training_metadata: self.training_metadata.clone(),
             pe_cache: std::sync::RwLock::new(
                 self.pe_cache
                     .read()
@@ -687,6 +718,7 @@ impl Model {
             blocks,
             final_norm: LayerNorm::new(embedding_dim),
             lm_head: Linear::new(embedding_dim, 1),
+            training_metadata: None,
             pe_cache: std::sync::RwLock::new(Vec::new()),
         };
 
@@ -719,6 +751,10 @@ impl Model {
     /// inference (`forward`, `forward_logits`, `generate*`) is unchanged.
     pub fn set_dropout(&mut self, p: f32) {
         self.dropout = p.clamp(0.0, 1.0);
+    }
+
+    pub fn set_training_metadata(&mut self, metadata: TrainingMetadata) {
+        self.training_metadata = Some(metadata);
     }
 
     /// Loads from disk. Only `.json` checkpoints are supported.

@@ -31,13 +31,13 @@ cargo run --release -p blip_trainer -- `
 Generate a one-shot response:
 
 ```pwsh
-cargo run --release -p blip -- --repl false -p "Who are you?" -m 32 -t 0.8 --seed 1
+cargo run --release -p blip -- -p "Who are you?" -m 32 -t 0.8 --seed 1
 ```
 
 REPL:
 
 ```pwsh
-cargo run --release -p blip -- --repl -t 0.8 --seed 1
+cargo run --release -p blip -- -t 0.8 --seed 1
 ```
 
 ## Trainer flags
@@ -63,7 +63,7 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | `--checkpoint-every` | 10                | Save checkpoint every N epochs (`0` = end only) |
 | `--min-count`     | 1                     | Drop tokens below this usage_count (specials always kept) |
 | `--seq-length`    | 256                   | Target sequence length for pretraining corpus loader |
-| `-p, --pretraining-files` | `training/pretraining/*`, `training/pretraining/books/*` | Pretraining corpus file globs, trained without `<stop>` |
+| `-p, --pretraining-files` | `training/pretraining/*` | Pretraining corpus file globs, trained without `<stop>` |
 | `-t, --tuning-files`  | `training/tuning/*` | Chat-tuning file globs, trained with `<stop>` |
 | `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` only) |
 
@@ -72,13 +72,12 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | Flag              | Default               | Meaning                                     |
 | ----------------- | --------------------- | ------------------------------------------- |
 | `-f, --model-file` | `models/basic.json`   | Checkpoint to load                          |
-| `-p, --prompt`    | none                  | One-shot prompt; if `--repl false`, falls back to `Who are you?` |
-| `-m, --max-new-tokens` | 64               | Generation budget                           |
+| `-p, --prompt`    | none                  | One-shot prompt; if omitted, CLI starts REPL mode |
+| `-m, --max-new-tokens` | 1024             | Generation budget                           |
 | `-t, --temperature` | 0.0 (= greedy)      | Sampling temperature                        |
 | `--top-k`         | none                  | Top-k filter                                |
 | `--top-p`         | none                  | Nucleus-sampling cutoff                     |
 | `--seed`          | 0 (= OS entropy)      | Sampling RNG seed                           |
-| `--repl`          | true                  | Interactive prompt loop                     |
 
 ## Architecture
 
@@ -122,9 +121,11 @@ significantly faster than re-running full-prefix attention each step.
 ## Checkpoint format
 
 Model version is stamped in `blip_ai/src/version.rs`. Loading accepts current
-version and compatible v0.4 checkpoints, then normalizes to the current
-version in-memory before saving.
+version only.
 Checkpoints are JSON-only (`.json`). The CLI defaults to `models/basic.json`.
+
+Trainer-generated checkpoints also include a `training_metadata` object with
+the effective trainer settings and resolved pretraining/tuning file lists.
 
 When generated ids detokenize to only whitespace/control output, the inference
 CLI prints a diagnostic (`<no output>` or `<blank output; generated ...>`) so
