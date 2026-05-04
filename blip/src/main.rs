@@ -3,7 +3,6 @@ use blip_ai::tokenizer::{detokenize_text, tokenize_user_prompt};
 use clap::Parser;
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
-use std::path::{Path, PathBuf};
 use std::io::{BufRead, Write};
 
 #[derive(Parser, Debug)]
@@ -104,47 +103,13 @@ fn run_once(model: &Model, prompt: &str, cfg: &SamplingConfig, seed: u64) {
     }
 }
 
-fn resolve_model_path(requested: &str) -> PathBuf {
-    let requested_path = PathBuf::from(requested);
-    if requested_path.exists() {
-        return requested_path;
-    }
-
-    let ext_is_json = Path::new(requested)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("json"))
-        .unwrap_or(false);
-    if !ext_is_json {
-        return requested_path;
-    }
-
-    let mut fallback = requested_path.clone();
-    fallback.set_extension("bin");
-    if fallback.exists() {
-        eprintln!(
-            "Model {} not found; falling back to {}.",
-            requested_path.display(),
-            fallback.display()
-        );
-        return fallback;
-    }
-
-    requested_path
-}
-
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = BlipArgs::parse();
 
-    let model_path = resolve_model_path(&args.model_file);
-    println!("Loading model from {}...", model_path.display());
-    let model = Model::load(
-        model_path
-            .to_str()
-            .expect("Model path is not valid UTF-8"),
-    )
+    println!("Loading model from {}...", args.model_file);
+    let model = Model::load(&args.model_file)
     .expect("Failed to load model");
 
     let cfg = SamplingConfig {

@@ -43,8 +43,8 @@ fn train_save_load_generate_roundtrip() {
         "loss did not decrease enough: l0={l0} last={last}"
     );
 
-    // Save -> load roundtrip (bincode).
-    let path = std::env::temp_dir().join("blip_e2e_model.bin");
+    // Save -> load roundtrip (JSON).
+    let path = std::env::temp_dir().join("blip_e2e_model.json");
     model.save(path.to_str().unwrap()).expect("save");
     let reloaded = Model::load(path.to_str().unwrap()).expect("load");
     let _ = std::fs::remove_file(&path);

@@ -5,8 +5,7 @@
 //!   * `forward_train`  - returns `(output, cache)` used during training
 //!   * `backward`       - given upstream gradient + cache, returns gradient
 //!     w.r.t. the input and accumulates parameter gradients in `*_grad`.
-//!   * `apply_grads(opt)` - apply accumulated grads via the configured
-//!     optimizer (SGD or Adam) and zero them.
+//!   * `apply_grads(opt)` - apply accumulated grads via Adam and zero them.
 //!
 //! All linear algebra goes through `ndarray`. Linear backward uses an outer
 //! product expressed as a `[out,1] x [1,in]` matmul, which is dramatically
@@ -48,8 +47,6 @@ pub fn xavier(rows: usize, cols: usize) -> Array2<f32> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum Optimizer {
-    /// Plain stochastic gradient descent. Exposed mostly for testing.
-    Sgd { lr: f32 },
     /// Adam. Steps are tracked per call to `step`.
     Adam {
         lr: f32,
@@ -72,13 +69,9 @@ impl Optimizer {
         }
     }
 
-    pub fn sgd(lr: f32) -> Self {
-        Self::Sgd { lr }
-    }
-
     pub fn lr(&self) -> f32 {
         match self {
-            Self::Sgd { lr } | Self::Adam { lr, .. } => *lr,
+            Self::Adam { lr, .. } => *lr,
         }
     }
 }
@@ -125,7 +118,7 @@ fn adam_step1(
     }
 }
 
-fn adam_step2(
+pub(crate) fn adam_step2(
     param: &mut Array2<f32>,
     grad: &Array2<f32>,
     state: &mut AdamState2,
@@ -234,10 +227,6 @@ impl Linear {
     pub fn apply_grads(&mut self, opt: Optimizer) {
         self.ensure_grads();
         match opt {
-            Optimizer::Sgd { lr } => {
-                self.weights.scaled_add(-lr, &self.w_grad);
-                self.bias.scaled_add(-lr, &self.b_grad);
-            }
             Optimizer::Adam {
                 lr, beta1, beta2, eps, ..
             } => {
@@ -275,6 +264,38 @@ impl Linear {
         self.w_grad *= factor;
         self.b_grad *= factor;
     }
+
+    /// Batched forward: `Y = X @ W.T + bias`
+    /// Input: `[batch, in_dim]`, Output: `[batch, out_dim]`
+    pub fn forward_batch(&self, x: &Array2<f32>) -> Array2<f32> {
+        let mut y = x.dot(&self.weights.t());
+        for mut row in y.rows_mut() {
+            row += &self.bias;
+        }
+        y
+    }
+
+    /// Batched forward with cache for training.
+    /// Returns `(Y, X)` where X is cached for backward.
+    pub fn forward_batch_train(&self, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+        (self.forward_batch(x), x.clone())
+    }
+
+    /// Batched backward: given `d_Y [batch, out_dim]` and `X_cache [batch, in_dim]`,
+    /// compute `d_X = d_Y @ W` and accumulate `W_grad += d_Y.T @ X_cache`, `b_grad += sum(d_Y)`.
+    pub fn backward_batch(&mut self, d_y: &Array2<f32>, x_cache: &Array2<f32>) -> Array2<f32> {
+        self.ensure_grads();
+        // W_grad += d_Y.T @ X_cache: [out, batch] @ [batch, in] -> [out, in]
+        let d_y_t = d_y.t().to_owned();
+        let outer = d_y_t.dot(x_cache);
+        self.w_grad += &outer;
+        // b_grad += sum over batch dimension
+        for row in d_y.rows() {
+            self.b_grad += &row;
+        }
+        // d_X = d_Y @ W: [batch, out] @ [out, in] -> [batch, in]
+        d_y.dot(&self.weights)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +320,11 @@ pub struct LayerNorm {
 pub struct LayerNormCache {
     pub x_hat: Array1<f32>,
     pub inv_std: f32,
+}
+
+pub struct LayerNormBatchCache {
+    pub x_hat: Array2<f32>,
+    pub inv_std: Array1<f32>,
 }
 
 impl LayerNorm {
@@ -359,10 +385,6 @@ impl LayerNorm {
     pub fn apply_grads(&mut self, opt: Optimizer) {
         self.ensure_grads();
         match opt {
-            Optimizer::Sgd { lr } => {
-                self.gamma.scaled_add(-lr, &self.g_grad);
-                self.beta.scaled_add(-lr, &self.b_grad);
-            }
             Optimizer::Adam {
                 lr, beta1, beta2, eps, ..
             } => {
@@ -399,11 +421,76 @@ impl LayerNorm {
         self.g_grad *= factor;
         self.b_grad *= factor;
     }
-}
 
-// ---------------------------------------------------------------------------
-// Activations
-// ---------------------------------------------------------------------------
+    /// Batched forward: normalize each row independently.
+    /// Input/Output: `[batch, dim]`
+    pub fn forward_batch(&self, x: &Array2<f32>) -> Array2<f32> {
+        let (n, dim) = x.dim();
+        let mut y = Array2::<f32>::zeros((n, dim));
+        for i in 0..n {
+            let x_i = x.row(i).to_owned();
+            let mean = x_i.sum() / (dim as f32);
+            let var = x_i.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / (dim as f32);
+            let inv_std = 1.0 / (var + self.eps).sqrt();
+            let x_hat = (&x_i - mean) * inv_std;
+            let y_i = &x_hat * &self.gamma + &self.beta;
+            y.row_mut(i).assign(&y_i);
+        }
+        y
+    }
+
+    /// Batched forward with cache for training.
+    pub fn forward_batch_train(&self, x: &Array2<f32>) -> (Array2<f32>, LayerNormBatchCache) {
+        let (n, dim) = x.dim();
+        let mut y = Array2::<f32>::zeros((n, dim));
+        let mut x_hat = Array2::<f32>::zeros((n, dim));
+        let mut inv_stds = Array1::<f32>::zeros(n);
+
+        for i in 0..n {
+            let x_i = x.row(i).to_owned();
+            let mean = x_i.sum() / (dim as f32);
+            let var = x_i.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / (dim as f32);
+            let inv_std = 1.0 / (var + self.eps).sqrt();
+            let x_h = (&x_i - mean) * inv_std;
+            let y_i = &x_h * &self.gamma + &self.beta;
+
+            x_hat.row_mut(i).assign(&x_h);
+            y.row_mut(i).assign(&y_i);
+            inv_stds[i] = inv_std;
+        }
+
+        (y, LayerNormBatchCache { x_hat, inv_std: inv_stds })
+    }
+
+    /// Batched backward: given `d_Y [batch, dim]` and cache,
+    /// accumulate parameter gradients and return `d_X [batch, dim]`.
+    pub fn backward_batch(&mut self, d_y: &Array2<f32>, cache: &LayerNormBatchCache) -> Array2<f32> {
+        self.ensure_grads();
+        let (n, dim) = d_y.dim();
+        let dim_f = dim as f32;
+        let mut d_x = Array2::<f32>::zeros((n, dim));
+
+        for i in 0..n {
+            let d_y_i = d_y.row(i).to_owned();
+            let x_hat_i = cache.x_hat.row(i).to_owned();
+            let inv_std = cache.inv_std[i];
+
+            // Accumulate gamma and beta gradients
+            self.g_grad += &(&d_y_i * &x_hat_i);
+            self.b_grad += &d_y_i;
+
+            // Backward through layernorm
+            let d_x_hat = &d_y_i * &self.gamma;
+            let sum_dxhat = d_x_hat.sum();
+            let sum_dxhat_xhat = (&d_x_hat * &x_hat_i).sum();
+            let scale = inv_std / dim_f;
+            let term = &d_x_hat * dim_f - sum_dxhat - &x_hat_i * sum_dxhat_xhat;
+            d_x.row_mut(i).assign(&(term * scale));
+        }
+
+        d_x
+    }
+}
 
 pub fn relu(x: &Array1<f32>) -> Array1<f32> {
     x.mapv(|v| v.max(0.0))
@@ -440,6 +527,26 @@ pub fn gelu_backward(d_y: &Array1<f32>, pre_activation: &Array1<f32>) -> Array1<
         let dgelu_dz = 0.5 * (1.0 + t) + 0.5 * z * (1.0 - t * t) * dinner_dz;
         *g * dgelu_dz
     }))
+}
+
+/// Batched GELU: apply per-element to `[batch, dim]`
+pub fn gelu_batch(x: &Array2<f32>) -> Array2<f32> {
+    x.mapv(|v| {
+        let inner = GELU_C * (v + GELU_A * v * v * v);
+        0.5 * v * (1.0 + inner.tanh())
+    })
+}
+
+/// Batched GELU backward: apply per-element
+pub fn gelu_backward_batch(d_y: &Array2<f32>, pre_activation: &Array2<f32>) -> Array2<f32> {
+    let (n, dim) = d_y.dim();
+    let mut result = Array2::<f32>::zeros((n, dim));
+    for i in 0..n {
+        let d_row = d_y.row(i).to_owned();
+        let z_row = pre_activation.row(i).to_owned();
+        result.row_mut(i).assign(&gelu_backward(&d_row, &z_row));
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -509,6 +616,12 @@ pub struct FeedForwardCache {
     pub h: Array1<f32>,
 }
 
+pub struct FeedForwardBatchCache {
+    pub x: Array2<f32>,
+    pub z1: Array2<f32>,
+    pub h: Array2<f32>,
+}
+
 impl FeedForward {
     pub fn new(dim: usize, hidden: usize) -> Self {
         Self {
@@ -541,6 +654,35 @@ impl FeedForward {
         let d_h = self.fc2.backward(d_y, &cache.h);
         let d_z1 = gelu_backward(&d_h, &cache.z1);
         self.fc1.backward(&d_z1, &cache.x)
+    }
+
+    /// Batched forward over `[batch, dim]`.
+    pub fn forward_batch(&self, x: &Array2<f32>) -> Array2<f32> {
+        let z1 = self.fc1.forward_batch(x);
+        let h = gelu_batch(&z1);
+        self.fc2.forward_batch(&h)
+    }
+
+    /// Batched forward with caches for training.
+    pub fn forward_batch_train(&self, x: &Array2<f32>) -> (Array2<f32>, FeedForwardBatchCache) {
+        let z1 = self.fc1.forward_batch(x);
+        let h = gelu_batch(&z1);
+        let y = self.fc2.forward_batch(&h);
+        (
+            y,
+            FeedForwardBatchCache {
+                x: x.clone(),
+                z1,
+                h,
+            },
+        )
+    }
+
+    /// Batched backward over `[batch, dim]`.
+    pub fn backward_batch(&mut self, d_y: &Array2<f32>, cache: &FeedForwardBatchCache) -> Array2<f32> {
+        let d_h = self.fc2.backward_batch(d_y, &cache.h);
+        let d_z1 = gelu_backward_batch(&d_h, &cache.z1);
+        self.fc1.backward_batch(&d_z1, &cache.x)
     }
 
     pub fn apply_grads(&mut self, opt: Optimizer) {

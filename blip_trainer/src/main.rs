@@ -100,6 +100,12 @@ struct TrainingArgs {
     #[arg(long, default_value = "0.0001", help = "Tuning minimum LR reached by cosine decay after warmup")]
     pub min_lr: f32,
 
+    #[arg(long, default_value = "1.0", help = "Global L2 gradient clipping threshold (<=0 disables)")]
+    pub grad_clip: f32,
+
+    #[arg(long, default_value = "false", help = "Disable rayon gradient accumulation for strict deterministic training")]
+    pub deterministic: bool,
+
     #[arg(long, default_value = "42", help = "Random seed (0 = OS entropy)")]
     pub seed: u64,
 
@@ -118,8 +124,7 @@ struct TrainingArgs {
     #[arg(short = 't', long = "tuning-files", default_values = vec!["training/tuning/*"], help = "Tuning files to use")]
     pub tuning_files: Vec<String>,
 
-    #[arg(short = 'o', long, default_value = "models/basic.json",
-          help = "Output path. .json => JSON, otherwise bincode.")]
+    #[arg(short = 'o', long, default_value = "models/basic.json", help = "Output path (.json only).")]
     pub output_file: String,
 }
 
@@ -210,6 +215,8 @@ fn main() {
     println!(" - tune batch_size:      {}", args.batch_size);
     println!(" - tune warmup_steps:    {}", args.warmup_steps);
     println!(" - tune min_lr:          {}", args.min_lr);
+    println!(" - grad_clip:            {}", args.grad_clip);
+    println!(" - deterministic:        {}", args.deterministic);
     println!(" - dropout:              {}", args.dropout);
     println!(" - val_split:            {}", args.val_split);
     println!(" - seed:                 {}", args.seed);
@@ -257,20 +264,20 @@ fn main() {
     training_data.get_model_mut().initialize_embeddings();
 
     let pretrain_lr_schedule = if args.pretrain_warmup > 0 {
-        LrSchedule::CosineWithWarmup {
+        Some(LrSchedule::CosineWithWarmup {
             warmup_steps: args.pretrain_warmup,
             min_lr: args.pretrain_min_lr,
-        }
+        })
     } else {
-        LrSchedule::Constant
+        None
     };
     let tune_lr_schedule = if args.warmup_steps > 0 {
-        LrSchedule::CosineWithWarmup {
+        Some(LrSchedule::CosineWithWarmup {
             warmup_steps: args.warmup_steps,
             min_lr: args.min_lr,
-        }
+        })
     } else {
-        LrSchedule::Constant
+        None
     };
 
     let pretrain_cfg = TrainingConfig {
@@ -283,6 +290,8 @@ fn main() {
         checkpoint_path: Some(args.output_file.clone()),
         lr_schedule: pretrain_lr_schedule,
         dropout: args.dropout,
+        grad_clip: if args.grad_clip > 0.0 { Some(args.grad_clip) } else { None },
+        deterministic: args.deterministic,
     };
 
     let tune_cfg = TrainingConfig {
@@ -295,6 +304,8 @@ fn main() {
         checkpoint_path: Some(args.output_file.clone()),
         lr_schedule: tune_lr_schedule,
         dropout: args.dropout,
+        grad_clip: if args.grad_clip > 0.0 { Some(args.grad_clip) } else { None },
+        deterministic: args.deterministic,
     };
 
     let train_start = std::time::Instant::now();

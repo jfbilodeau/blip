@@ -65,7 +65,7 @@ cargo run --release -p blip -- --repl -t 0.8 --seed 1
 | `--seq-length`    | 256                   | Target sequence length for pretraining corpus loader |
 | `-p, --pretraining-files` | `training/pretraining/*`, `training/pretraining/books/*` | Pretraining corpus file globs, trained without `<stop>` |
 | `-t, --tuning-files`  | `training/tuning/*` | Chat-tuning file globs, trained with `<stop>` |
-| `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` → JSON, else bincode) |
+| `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` only) |
 
 ## Inference flags
 
@@ -113,8 +113,8 @@ cargo test --workspace
 ```
 
 Includes unit tests for every nn primitive, attention/transformer math,
-save/load roundtrips (bincode + JSON), an Adam overfit test, and an
-end-to-end pipeline test (`blip_ai/tests/end_to_end.rs`).
+JSON save/load roundtrips, an Adam overfit test, and an end-to-end pipeline
+test (`blip_ai/tests/end_to_end.rs`).
 
 Generation uses an incremental per-layer KV cache so token generation is
 significantly faster than re-running full-prefix attention each step.
@@ -124,9 +124,7 @@ significantly faster than re-running full-prefix attention each step.
 Model version is stamped in `blip_ai/src/version.rs`. Loading accepts current
 version and compatible v0.4 checkpoints, then normalizes to the current
 version in-memory before saving.
-Path extension picks the format: `.json` is human-readable, anything else is
-bincode (smaller and faster). The CLI defaults to `models/basic.json` and will
-fallback to `models/basic.bin` if the JSON path is missing.
+Checkpoints are JSON-only (`.json`). The CLI defaults to `models/basic.json`.
 
 When generated ids detokenize to only whitespace/control output, the inference
 CLI prints a diagnostic (`<no output>` or `<blank output; generated ...>`) so

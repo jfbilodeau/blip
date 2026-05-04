@@ -35,8 +35,6 @@ pub enum StopTokenMode {
 /// Learning-rate schedule applied per optimizer step.
 #[derive(Clone, Copy, Debug)]
 pub enum LrSchedule {
-    /// Constant learning rate. `lr` from `TrainingConfig` is used as-is.
-    Constant,
     /// Linear warmup for `warmup_steps` from 0 -> `lr`, then cosine decay
     /// down to `min_lr` over the remaining steps.
     CosineWithWarmup { warmup_steps: usize, min_lr: f32 },
@@ -45,7 +43,6 @@ pub enum LrSchedule {
 impl LrSchedule {
     pub fn lr_at(&self, step: usize, total_steps: usize, base_lr: f32) -> f32 {
         match *self {
-            LrSchedule::Constant => base_lr,
             LrSchedule::CosineWithWarmup { warmup_steps, min_lr } => {
                 if step < warmup_steps {
                     base_lr * (step as f32 + 1.0) / (warmup_steps.max(1) as f32)
@@ -72,9 +69,14 @@ pub struct TrainingConfig {
     /// Save a checkpoint every N epochs (0 = only at the end).
     pub checkpoint_every: usize,
     pub checkpoint_path: Option<String>,
-    pub lr_schedule: LrSchedule,
+    pub lr_schedule: Option<LrSchedule>,
     /// Dropout probability applied to attention and FFN outputs during training.
     pub dropout: f32,
+    /// Global L2 gradient clipping threshold for Adam. `None` disables clipping.
+    pub grad_clip: Option<f32>,
+    /// Force deterministic training order and dropout behavior by disabling
+    /// rayon batch parallelism during gradient accumulation.
+    pub deterministic: bool,
 }
 
 impl Default for TrainingConfig {
@@ -87,8 +89,10 @@ impl Default for TrainingConfig {
             seed: 0,
             checkpoint_every: 0,
             checkpoint_path: None,
-            lr_schedule: LrSchedule::Constant,
+            lr_schedule: None,
             dropout: 0.0,
+            grad_clip: Some(1.0),
+            deterministic: false,
         }
     }
 }
@@ -314,6 +318,12 @@ impl TrainingData {
         let mut epoch_rng = ChaCha12Rng::seed_from_u64(cfg.seed.wrapping_add(1));
         let mut indices: Vec<usize> = (0..train_seqs.len()).collect();
         let mut progress_line = ProgressLine::default();
+        let deterministic_mode = cfg.deterministic;
+        if deterministic_mode {
+            info!(
+                "deterministic training enabled: seeded dropout disables rayon batch parallelism"
+            );
+        }
 
         for epoch in 0..cfg.num_epochs {
             indices.shuffle(&mut epoch_rng);
@@ -321,57 +331,80 @@ impl TrainingData {
             let mut count = 0usize;
             let epoch_start = Instant::now();
             let mut last_progress_update = epoch_start.checked_sub(Duration::from_secs(1)).unwrap_or(epoch_start);
+            let progress_interval = if deterministic_mode {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(250)
+            };
             let batch_size = cfg.batch_size.max(1);
 
             for batch in indices.chunks(batch_size) {
-                let template = &self.model;
-                let (batch_grads, batch_loss, batch_count) = batch
-                    .par_iter()
-                    .fold(
-                        || {
-                            let mut local = template.clone();
-                            local.zero_all_grads();
-                            (local, 0.0_f32, 0usize)
-                        },
-                        |(mut local, loss_sum, count), &idx| {
-                            let loss = local.train_sequence(&train_seqs[idx]);
-                            (local, loss_sum + loss, count + 1)
-                        },
-                    )
-                    .reduce(
-                        || {
-                            let mut local = template.clone();
-                            local.zero_all_grads();
-                            (local, 0.0_f32, 0usize)
-                        },
-                        |(mut lhs_model, lhs_loss, lhs_count), (rhs_model, rhs_loss, rhs_count)| {
+                if deterministic_mode {
+                    self.model.zero_all_grads();
+                    let mut batch_loss = 0.0_f32;
+                    for &idx in batch {
+                        batch_loss += self.model.train_sequence(&train_seqs[idx]);
+                    }
+                    total_loss += batch_loss;
+                    count += batch.len();
+                } else {
+                    let template = &self.model;
+                    let (batch_grads, batch_loss, batch_count) = batch
+                        .par_iter()
+                        .fold(
+                            || {
+                                let mut local = template.clone();
+                                local.zero_all_grads();
+                                (local, 0.0_f32, 0usize)
+                            },
+                            |(mut local, loss_sum, count), &idx| {
+                                let loss = local.train_sequence(&train_seqs[idx]);
+                                (local, loss_sum + loss, count + 1)
+                            },
+                        )
+                        .reduce_with(|(mut lhs_model, lhs_loss, lhs_count), (rhs_model, rhs_loss, rhs_count)| {
                             lhs_model.add_grads_from(&rhs_model);
                             (lhs_model, lhs_loss + rhs_loss, lhs_count + rhs_count)
-                        },
-                    );
+                        })
+                        .expect("non-empty batch");
 
-                self.model.zero_all_grads();
-                self.model.add_grads_from(&batch_grads);
+                    self.model.zero_all_grads();
+                    self.model.add_grads_from(&batch_grads);
 
-                total_loss += batch_loss;
-                count += batch_count;
+                    total_loss += batch_loss;
+                    count += batch_count;
+                }
 
-                let lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
-                self.model.apply_grads(Optimizer::adam(lr));
+                let lr = cfg
+                    .lr_schedule
+                    .as_ref()
+                    .map(|s| s.lr_at(step, total_steps, cfg.learning_rate))
+                    .unwrap_or(cfg.learning_rate);
+                self.model.apply_grads(Optimizer::Adam {
+                    lr,
+                    beta1: 0.9,
+                    beta2: 0.999,
+                    eps: 1e-8,
+                    grad_clip: cfg.grad_clip,
+                });
                 step += 1;
 
                 let should_update_progress = count == train_seqs.len()
-                    || last_progress_update.elapsed() >= Duration::from_millis(250);
+                    || last_progress_update.elapsed() >= progress_interval;
                 if should_update_progress {
                     let percent = (count as f32 / train_seqs.len().max(1) as f32) * 100.0;
                     let avg_loss = total_loss / count.max(1) as f32;
-                    let current_lr = cfg.lr_schedule.lr_at(step, total_steps, cfg.learning_rate);
+                    let current_lr = cfg
+                        .lr_schedule
+                        .as_ref()
+                        .map(|s| s.lr_at(step, total_steps, cfg.learning_rate))
+                        .unwrap_or(cfg.learning_rate);
                     let elapsed = epoch_start.elapsed();
                     let elapsed_secs = elapsed.as_secs_f32();
                     let seqs_per_sec = (count as f32 / elapsed_secs.max(1e-6)).max(1e-6);
                     let remaining = train_seqs.len().saturating_sub(count);
                     let eta_secs = remaining as f32 / seqs_per_sec;
-                    progress_line.print(&format!(
+                    let message = format!(
                         "Epoch {}/{} [{:>5.1}%] {}/{} seq - avg loss {:.4} - lr {:.6} - elapsed {:.1}s - eta {:.1}s",
                         epoch + 1,
                         cfg.num_epochs,
@@ -382,7 +415,12 @@ impl TrainingData {
                         current_lr,
                         elapsed_secs,
                         eta_secs
-                    ));
+                    );
+                    if deterministic_mode {
+                        println!("{}", message);
+                    } else {
+                        progress_line.print(&message);
+                    }
                     last_progress_update = Instant::now();
                 }
             }

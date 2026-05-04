@@ -12,12 +12,11 @@
 //! clipping). Generation supports greedy / temperature / top-k / top-p
 //! sampling.
 //!
-//! Checkpoints support both bincode and JSON. The project defaults now use
-//! `.json` paths for easier inspection.
+//! Checkpoints are JSON (`.json`) for easier inspection.
 
 use crate::nn::{
-    softmax, softmax_cross_entropy, AdamState2, FeedForward, FeedForwardCache, LayerNorm,
-    LayerNormCache, Linear, Optimizer,
+    softmax, softmax_cross_entropy, AdamState2, FeedForward, FeedForwardBatchCache,
+    LayerNorm, LayerNormBatchCache, Linear, Optimizer,
 };
 use crate::tokenizer::default_token_texts;
 use crate::version::MODEL_VERSION;
@@ -125,15 +124,9 @@ impl SelfAttention {
         let scale = 1.0 / (head_dim as f32).sqrt();
         let n = xs.nrows();
 
-        let mut qs = Array2::<f32>::zeros((n, dim));
-        let mut ks = Array2::<f32>::zeros((n, dim));
-        let mut vs = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            let x = xs.row(i).to_owned();
-            qs.row_mut(i).assign(&self.w_q.forward(&x));
-            ks.row_mut(i).assign(&self.w_k.forward(&x));
-            vs.row_mut(i).assign(&self.w_v.forward(&x));
-        }
+        let qs = self.w_q.forward_batch(xs);
+        let ks = self.w_k.forward_batch(xs);
+        let vs = self.w_v.forward_batch(xs);
 
         let mut attn = Array3::<f32>::zeros((self.n_heads, n, n));
         let mut context = Array2::<f32>::zeros((n, dim));
@@ -169,11 +162,7 @@ impl SelfAttention {
             }
         }
 
-        let mut outputs = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            let ctx = context.row(i).to_owned();
-            outputs.row_mut(i).assign(&self.w_o.forward(&ctx));
-        }
+        let outputs = self.w_o.forward_batch(&context);
 
         (
             outputs,
@@ -198,13 +187,8 @@ impl SelfAttention {
         let scale = 1.0 / (head_dim as f32).sqrt();
         let n = d_outs.nrows();
 
-        // d_context per position via W_o backward
-        let mut d_context = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            let d_out = d_outs.row(i).to_owned();
-            let ctx = cache.context.row(i).to_owned();
-            d_context.row_mut(i).assign(&self.w_o.backward(&d_out, &ctx));
-        }
+        // d_context via batched W_o backward
+        let d_context = self.w_o.backward_batch(d_outs, &cache.context);
 
         let mut d_q = Array2::<f32>::zeros((n, dim));
         let mut d_k = Array2::<f32>::zeros((n, dim));
@@ -247,14 +231,10 @@ impl SelfAttention {
             }
         }
 
-        let mut d_xs = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            let x = cache.xs.row(i).to_owned();
-            let dq = self.w_q.backward(&d_q.row(i).to_owned(), &x);
-            let dk = self.w_k.backward(&d_k.row(i).to_owned(), &x);
-            let dv = self.w_v.backward(&d_v.row(i).to_owned(), &x);
-            d_xs.row_mut(i).assign(&(dq + dk + dv));
-        }
+        let dq_x = self.w_q.backward_batch(&d_q, &cache.xs);
+        let dk_x = self.w_k.backward_batch(&d_k, &cache.xs);
+        let dv_x = self.w_v.backward_batch(&d_v, &cache.xs);
+        let d_xs = dq_x + dk_x + dv_x;
         d_xs
     }
 
@@ -334,22 +314,15 @@ pub struct DecoderBlock {
     pub attn: SelfAttention,
     pub ln2: LayerNorm,
     pub ffn: FeedForward,
-    /// Runtime-only: dropout probability applied to attention and FFN outputs
-    /// during `forward_train`. Not serialized — always defaults to 0.0 on load
-    /// so existing checkpoints behave identically.
-    #[serde(skip, default)]
-    pub dropout: f32,
 }
 
 pub struct DecoderBlockCache {
-    pub ln1_caches: Vec<LayerNormCache>,
-    pub ln1_outs: Array2<f32>,
+    pub ln1_cache: LayerNormBatchCache,
     pub attn_cache: AttentionCache,
     pub attn_drop: Vec<crate::nn::DropoutCache>,
     pub residual1: Array2<f32>,
-    pub ln2_caches: Vec<LayerNormCache>,
-    pub ln2_outs: Array2<f32>,
-    pub ffn_caches: Vec<FeedForwardCache>,
+    pub ln2_cache: LayerNormBatchCache,
+    pub ffn_cache: FeedForwardBatchCache,
     pub ffn_drop: Vec<crate::nn::DropoutCache>,
 }
 
@@ -360,78 +333,41 @@ impl DecoderBlock {
             attn: SelfAttention::new(dim, n_heads),
             ln2: LayerNorm::new(dim),
             ffn: FeedForward::new(dim, ffn_hidden),
-            dropout: 0.0,
         }
-    }
-
-    pub fn set_dropout(&mut self, p: f32) {
-        self.dropout = p.clamp(0.0, 1.0);
     }
 
     pub fn forward(&self, xs: &Array2<f32>) -> Array2<f32> {
-        let n = xs.nrows();
-        let dim = xs.ncols();
-        let mut normed1 = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            normed1
-                .row_mut(i)
-                .assign(&self.ln1.forward(&xs.row(i).to_owned()));
-        }
+        let normed1 = self.ln1.forward_batch(xs);
         let attn_out = self.attn.forward(&normed1);
         let mut res1 = xs.clone();
         res1 += &attn_out;
-        let mut normed2 = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            normed2
-                .row_mut(i)
-                .assign(&self.ln2.forward(&res1.row(i).to_owned()));
-        }
-        let mut ffn_out = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            ffn_out
-                .row_mut(i)
-                .assign(&self.ffn.forward(&normed2.row(i).to_owned()));
-        }
+        let normed2 = self.ln2.forward_batch(&res1);
+        let ffn_out = self.ffn.forward_batch(&normed2);
         res1 + ffn_out
     }
 
-    pub fn forward_train(&self, xs: &Array2<f32>) -> (Array2<f32>, DecoderBlockCache) {
+    pub fn forward_train(&self, xs: &Array2<f32>, dropout: f32) -> (Array2<f32>, DecoderBlockCache) {
         let n = xs.nrows();
         let dim = xs.ncols();
-        let mut ln1_caches = Vec::with_capacity(n);
-        let mut ln1_outs = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            let (y, c) = self.ln1.forward_train(&xs.row(i).to_owned());
-            ln1_outs.row_mut(i).assign(&y);
-            ln1_caches.push(c);
-        }
+        let (ln1_outs, ln1_cache) = self.ln1.forward_batch_train(xs);
         let (attn_outs_raw, attn_cache) = self.attn.forward_train(&ln1_outs);
         let mut attn_drop = Vec::with_capacity(n);
         let mut attn_outs = Array2::<f32>::zeros((n, dim));
         for i in 0..n {
-            let (y, c) = crate::nn::dropout_forward(&attn_outs_raw.row(i).to_owned(), self.dropout);
+            let (y, c) = crate::nn::dropout_forward(&attn_outs_raw.row(i).to_owned(), dropout);
             attn_outs.row_mut(i).assign(&y);
             attn_drop.push(c);
         }
         let mut residual1 = xs.clone();
         residual1 += &attn_outs;
 
-        let mut ln2_caches = Vec::with_capacity(n);
-        let mut ln2_outs = Array2::<f32>::zeros((n, dim));
-        for i in 0..n {
-            let (y, c) = self.ln2.forward_train(&residual1.row(i).to_owned());
-            ln2_outs.row_mut(i).assign(&y);
-            ln2_caches.push(c);
-        }
-
-        let mut ffn_caches = Vec::with_capacity(n);
+        let (ln2_outs, ln2_cache) = self.ln2.forward_batch_train(&residual1);
+        let (ffn_outs_raw, ffn_cache) = self.ffn.forward_batch_train(&ln2_outs);
         let mut ffn_drop = Vec::with_capacity(n);
         let mut ffn_outs = Array2::<f32>::zeros((n, dim));
         for i in 0..n {
-            let (y_raw, c_ffn) = self.ffn.forward_train(&ln2_outs.row(i).to_owned());
-            let (y, c_drop) = crate::nn::dropout_forward(&y_raw, self.dropout);
+            let (y, c_drop) = crate::nn::dropout_forward(&ffn_outs_raw.row(i).to_owned(), dropout);
             ffn_outs.row_mut(i).assign(&y);
-            ffn_caches.push(c_ffn);
             ffn_drop.push(c_drop);
         }
         let outs = &residual1 + &ffn_outs;
@@ -439,14 +375,12 @@ impl DecoderBlock {
         (
             outs,
             DecoderBlockCache {
-                ln1_caches,
-                ln1_outs,
+                ln1_cache,
                 attn_cache,
                 attn_drop,
                 residual1,
-                ln2_caches,
-                ln2_outs,
-                ffn_caches,
+                ln2_cache,
+                ffn_cache,
                 ffn_drop,
             },
         )
@@ -467,17 +401,11 @@ impl DecoderBlock {
             // backprop through FFN dropout, then FFN itself.
             let d_ffn_raw =
                 crate::nn::dropout_backward(&d_outs.row(i).to_owned(), &cache.ffn_drop[i]);
-            d_ln2_out
-                .row_mut(i)
-                .assign(&self.ffn.backward(&d_ffn_raw, &cache.ffn_caches[i]));
+            d_ln2_out.row_mut(i).assign(&d_ffn_raw);
         }
-        for i in 0..n {
-            let d_r = self
-                .ln2
-                .backward(&d_ln2_out.row(i).to_owned(), &cache.ln2_caches[i]);
-            let mut row = d_residual1.row_mut(i);
-            row += &d_r;
-        }
+        let d_ln2_in = self.ffn.backward_batch(&d_ln2_out, &cache.ffn_cache);
+        let d_r = self.ln2.backward_batch(&d_ln2_in, &cache.ln2_cache);
+        d_residual1 += &d_r;
 
         // d_residual1 flows into both branches of the attention residual.
         let mut d_x = d_residual1.clone();
@@ -489,15 +417,8 @@ impl DecoderBlock {
             ));
         }
         let d_ln1_out = self.attn.backward(&d_attn_out_raw, &cache.attn_cache);
-        for i in 0..n {
-            let d = self
-                .ln1
-                .backward(&d_ln1_out.row(i).to_owned(), &cache.ln1_caches[i]);
-            let mut row = d_x.row_mut(i);
-            row += &d;
-        }
-
-        let _ = &cache.ln1_outs;
+        let d = self.ln1.backward_batch(&d_ln1_out, &cache.ln1_cache);
+        d_x += &d;
         d_x
     }
 
@@ -619,6 +540,12 @@ fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &
                     *p = 0.0;
                 }
             }
+            let sum_k: f32 = probs.iter().sum();
+            if sum_k > 0.0 {
+                for p in &mut probs {
+                    *p /= sum_k;
+                }
+            }
         }
     }
 
@@ -670,21 +597,6 @@ fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &
     probs.len() - 1
 }
 
-fn argmax_excluding(logits: &Array1<f32>, excluded: usize) -> Option<usize> {
-    let mut best_idx: Option<usize> = None;
-    let mut best_val = f32::NEG_INFINITY;
-    for (i, v) in logits.iter().enumerate() {
-        if i == excluded {
-            continue;
-        }
-        if *v > best_val {
-            best_val = *v;
-            best_idx = Some(i);
-        }
-    }
-    best_idx
-}
-
 // ---------------------------------------------------------------------------
 // Model
 // ---------------------------------------------------------------------------
@@ -701,15 +613,12 @@ pub struct Model {
     pub embeddings_grad: Array2<f32>,
     #[serde(skip, default)]
     pub embeddings_state: AdamState2,
+    /// Runtime-only dropout probability used during training.
+    #[serde(skip, default)]
+    dropout: f32,
     pub blocks: Vec<DecoderBlock>,
     pub final_norm: LayerNorm,
     pub lm_head: Linear,
-    /// When true, `lm_head.weights` is kept equal to `embeddings` and only
-    /// the LM-head bias is an independent parameter. Defaults to true; old
-    /// checkpoints without the field are also treated as tied so their
-    /// in-memory `lm_head.weights` becomes a mirror of `embeddings` on load.
-    #[serde(default = "Model::default_tie_embeddings")]
-    pub tie_embeddings: bool,
     /// Lazily grown cache of sinusoidal positional encodings. Never serialized.
     #[serde(skip, default)]
     pe_cache: std::sync::RwLock<Vec<Array1<f32>>>,
@@ -726,10 +635,10 @@ impl Clone for Model {
             embeddings: self.embeddings.clone(),
             embeddings_grad: self.embeddings_grad.clone(),
             embeddings_state: self.embeddings_state.clone(),
+            dropout: self.dropout,
             blocks: self.blocks.clone(),
             final_norm: self.final_norm.clone(),
             lm_head: self.lm_head.clone(),
-            tie_embeddings: self.tie_embeddings,
             pe_cache: std::sync::RwLock::new(
                 self.pe_cache
                     .read()
@@ -741,31 +650,23 @@ impl Clone for Model {
 }
 
 impl Model {
+    fn insert_token_if_missing(&mut self, id: &str, usage_count: u32) -> usize {
+        if let Some(index) = self.get_token_id(id) {
+            return index;
+        }
+        let new_index = self.tokens.len();
+        self.tokens.push(Token {
+            text: id.to_string(),
+            usage_count,
+        });
+        new_index
+    }
+
     fn is_supported_version(v: &str) -> bool {
         // Only the current version is supported. The `<bos>` token was
         // removed in 0.8.0, which shifted token ids — older checkpoints
         // would silently misinterpret special-token ids if loaded.
         v == MODEL_VERSION
-    }
-
-    fn default_tie_embeddings() -> bool {
-        // Untied by default. Tying makes pretraining corrupt the special-token
-        // rows of the LM head (negative-class gradients flow into the shared
-        // embedding rows for `<user>`/`<ai>`/`<stop>`, which never appear as
-        // targets in the corpus). Old checkpoints that were trained tied still
-        // load fine because their lm_head.weights already mirror embeddings;
-        // they simply won't be re-tied after subsequent optimizer steps.
-        false
-    }
-
-    /// Configure whether the LM head shares parameters with the embedding
-    /// table. Must be called before [`Model::initialize_embeddings`] (or
-    /// before any training step) for the change to take effect.
-    pub fn set_tie_embeddings(&mut self, tie: bool) {
-        self.tie_embeddings = tie;
-        if tie && self.lm_head.weights.shape() == self.embeddings.shape() {
-            self.sync_lm_head_from_embeddings();
-        }
     }
 
     pub fn new(embedding_dim: usize, depth: usize, n_heads: usize) -> Self {
@@ -782,20 +683,20 @@ impl Model {
             embeddings: Array2::zeros((0, embedding_dim)),
             embeddings_grad: Array2::zeros((0, embedding_dim)),
             embeddings_state: AdamState2::default(),
+            dropout: 0.0,
             blocks,
             final_norm: LayerNorm::new(embedding_dim),
             lm_head: Linear::new(embedding_dim, 1),
-            tie_embeddings: Self::default_tie_embeddings(),
             pe_cache: std::sync::RwLock::new(Vec::new()),
         };
 
-        model.register_token(TOKEN_UNKNOWN);
-        model.register_token(TOKEN_STOP);
-        model.register_token(TOKEN_TOOL);
-        model.register_token(TOKEN_USER);
-        model.register_token(TOKEN_AI);
+        model.insert_token_if_missing(TOKEN_UNKNOWN, 0);
+        model.insert_token_if_missing(TOKEN_STOP, 0);
+        model.insert_token_if_missing(TOKEN_TOOL, 0);
+        model.insert_token_if_missing(TOKEN_USER, 0);
+        model.insert_token_if_missing(TOKEN_AI, 0);
         for token in default_token_texts() {
-            model.register_token(&token);
+            model.insert_token_if_missing(&token, 0);
         }
 
         model
@@ -817,26 +718,23 @@ impl Model {
     /// Set dropout probability on every decoder block. Affects training only;
     /// inference (`forward`, `forward_logits`, `generate*`) is unchanged.
     pub fn set_dropout(&mut self, p: f32) {
-        for b in &mut self.blocks {
-            b.set_dropout(p);
-        }
+        self.dropout = p.clamp(0.0, 1.0);
     }
 
-    /// Loads from disk. JSON if path ends in `.json`, otherwise bincode.
+    /// Loads from disk. Only `.json` checkpoints are supported.
     pub fn load(file_name: &str) -> Result<Self, String> {
-        let bytes = std::fs::read(file_name).map_err(|e| e.to_string())?;
-        let mut model: Model = if Path::new(file_name)
+        if Path::new(file_name)
             .extension()
             .and_then(|s| s.to_str())
-            == Some("json")
+            != Some("json")
         {
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?
-        } else {
-            let cfg = bincode::config::standard();
-            let (m, _): (Model, usize) =
-                bincode::serde::decode_from_slice(&bytes, cfg).map_err(|e| e.to_string())?;
-            m
-        };
+            return Err(format!(
+                "Unsupported checkpoint format for '{}'. Use a .json file.",
+                file_name
+            ));
+        }
+        let bytes = std::fs::read(file_name).map_err(|e| e.to_string())?;
+        let mut model: Model = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         if !Self::is_supported_version(&model.version) {
             return Err(format!(
                 "Model version mismatch: expected {} (or compatible prior version), got {}",
@@ -846,34 +744,28 @@ impl Model {
         // Normalize compatible checkpoints to the current version when loaded.
         model.version = MODEL_VERSION.to_string();
         model.embeddings_grad = Array2::zeros(model.embeddings.raw_dim());
-        // Re-tie the LM head from the embedding table. For old checkpoints
-        // that trained with an independent head this discards the previously
-        // learned head weights, but going forward the model is tied. The
-        // bias term is preserved.
-        if model.tie_embeddings {
-            model.sync_lm_head_from_embeddings();
-        }
+        model.dropout = 0.0;
         Ok(model)
     }
 
     pub fn save(&self, file_name: &str) -> Result<(), String> {
+        if Path::new(file_name)
+            .extension()
+            .and_then(|s| s.to_str())
+            != Some("json")
+        {
+            return Err(format!(
+                "Unsupported checkpoint format for '{}'. Use a .json file.",
+                file_name
+            ));
+        }
         if let Some(parent) = Path::new(file_name).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
         }
-        if Path::new(file_name)
-            .extension()
-            .and_then(|s| s.to_str())
-            == Some("json")
-        {
-            let file = std::fs::File::create(file_name).map_err(|e| e.to_string())?;
-            serde_json::to_writer(file, self).map_err(|e| e.to_string())?;
-        } else {
-            let cfg = bincode::config::standard();
-            let bytes = bincode::serde::encode_to_vec(self, cfg).map_err(|e| e.to_string())?;
-            std::fs::write(file_name, bytes).map_err(|e| e.to_string())?;
-        }
+        let file = std::fs::File::create(file_name).map_err(|e| e.to_string())?;
+        serde_json::to_writer(file, self).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -908,12 +800,7 @@ impl Model {
             self.tokens[index].usage_count += 1;
             return index;
         }
-        let new_index = self.tokens.len();
-        self.tokens.push(Token {
-            text: id.to_string(),
-            usage_count: 1,
-        });
-        new_index
+        self.insert_token_if_missing(id, 1)
     }
 
     /// Drop tokens with `usage_count < min_count` from the vocabulary. Special
@@ -939,17 +826,6 @@ impl Model {
         self.embeddings_grad = Array2::zeros((vocab, self.embedding_dim));
         self.embeddings_state = AdamState2::default();
         self.lm_head = Linear::new(self.embedding_dim, vocab);
-        if self.tie_embeddings {
-            self.sync_lm_head_from_embeddings();
-        }
-    }
-
-    /// Copy `embeddings` into `lm_head.weights` so the head shares parameters
-    /// with the input embedding table. The head bias is left untouched.
-    pub fn sync_lm_head_from_embeddings(&mut self) {
-        if self.lm_head.weights.shape() == self.embeddings.shape() {
-            self.lm_head.weights.assign(&self.embeddings);
-        }
     }
 
     fn ensure_embeddings_grad(&mut self) {
@@ -1033,9 +909,9 @@ impl Model {
         for block in &self.blocks {
             xs = block.forward(&xs);
         }
-        let last = xs.row(xs.nrows() - 1).to_owned();
-        let normed = self.final_norm.forward(&last);
-        self.lm_head.forward(&normed)
+        let normed = self.final_norm.forward_batch(&xs);
+        let logits = self.lm_head.forward_batch(&normed);
+        logits.row(logits.nrows() - 1).to_owned()
     }
 
     // -- training step --------------------------------------------------------
@@ -1051,48 +927,28 @@ impl Model {
         let mut xs = self.embed_sequence(inputs);
         let mut block_caches: Vec<DecoderBlockCache> = Vec::with_capacity(self.blocks.len());
         for block in &self.blocks {
-            let (out, cache) = block.forward_train(&xs);
+            let (out, cache) = block.forward_train(&xs, self.dropout);
             xs = out;
             block_caches.push(cache);
         }
 
-        let n = xs.nrows();
-        let mut ln_caches: Vec<LayerNormCache> = Vec::with_capacity(n);
-        let mut normed = Array2::<f32>::zeros(xs.raw_dim());
-        for i in 0..n {
-            let (y, c) = self.final_norm.forward_train(&xs.row(i).to_owned());
-            normed.row_mut(i).assign(&y);
-            ln_caches.push(c);
-        }
-
-        let mut logits: Vec<Array1<f32>> = Vec::with_capacity(n);
-        let mut head_caches: Vec<Array1<f32>> = Vec::with_capacity(n);
-        for i in 0..n {
-            let (y, c) = self.lm_head.forward_train(&normed.row(i).to_owned());
-            logits.push(y);
-            head_caches.push(c);
-        }
+        let (normed, ln_cache) = self.final_norm.forward_batch_train(&xs);
+        let (logits, head_cache) = self.lm_head.forward_batch_train(&normed);
 
         let mut total_loss = 0.0_f32;
-        let mut d_logits: Vec<Array1<f32>> = Vec::with_capacity(n);
+        let mut d_logits = Array2::<f32>::zeros(logits.raw_dim());
         for (i, target) in targets.iter().enumerate() {
-            let (loss, d) = softmax_cross_entropy(&logits[i], *target);
+            let (loss, d) = softmax_cross_entropy(&logits.row(i).to_owned(), *target);
             total_loss += loss;
-            d_logits.push(d);
+            d_logits.row_mut(i).assign(&d);
         }
         let avg_loss = total_loss / targets.len() as f32;
 
         let scale = 1.0 / targets.len() as f32;
-        for d in &mut d_logits {
-            *d *= scale;
-        }
+        d_logits *= scale;
 
-        let mut d_xs = Array2::<f32>::zeros(xs.raw_dim());
-        for i in 0..d_logits.len() {
-            let d_normed = self.lm_head.backward(&d_logits[i], &head_caches[i]);
-            let d_x = self.final_norm.backward(&d_normed, &ln_caches[i]);
-            d_xs.row_mut(i).assign(&d_x);
-        }
+        let d_normed = self.lm_head.backward_batch(&d_logits, &head_cache);
+        let mut d_xs = self.final_norm.backward_batch(&d_normed, &ln_cache);
         for (block, cache) in self.blocks.iter_mut().zip(block_caches.iter()).rev() {
             d_xs = block.backward(&d_xs, cache);
         }
@@ -1117,11 +973,11 @@ impl Model {
         for block in &self.blocks {
             xs = block.forward(&xs);
         }
+        let normed = self.final_norm.forward_batch(&xs);
+        let logits = self.lm_head.forward_batch(&normed);
         let mut total = 0.0_f32;
         for (i, &t) in targets.iter().enumerate() {
-            let normed = self.final_norm.forward(&xs.row(i).to_owned());
-            let logits = self.lm_head.forward(&normed);
-            let p = softmax(&logits);
+            let p = softmax(&logits.row(i).to_owned());
             total += -p[t].max(1e-12).ln();
         }
         total / targets.len() as f32
@@ -1216,19 +1072,6 @@ impl Model {
     /// Apply one optimizer step. If `opt` is Adam with `grad_clip = Some(c)`,
     /// global L2 norm is clipped to `c` before stepping.
     pub fn apply_grads(&mut self, opt: Optimizer) {
-        // With tied embeddings, the LM head's weight gradient is the gradient
-        // w.r.t. the *shared* embedding matrix. Fold it into `embeddings_grad`
-        // before clipping, then zero `lm_head.w_grad` so the head's own
-        // optimizer step only updates the bias.
-        if self.tie_embeddings {
-            self.ensure_embeddings_grad();
-            self.lm_head.ensure_grads();
-            if self.lm_head.w_grad.shape() == self.embeddings_grad.shape() {
-                self.embeddings_grad += &self.lm_head.w_grad;
-                self.lm_head.w_grad.fill(0.0);
-            }
-        }
-
         if let Optimizer::Adam {
             grad_clip: Some(c), ..
         } = opt
@@ -1242,35 +1085,18 @@ impl Model {
         // Embeddings step
         self.ensure_embeddings_grad();
         match opt {
-            Optimizer::Sgd { lr } => {
-                self.embeddings.scaled_add(-lr, &self.embeddings_grad);
-            }
             Optimizer::Adam {
                 lr, beta1, beta2, eps, ..
             } => {
-                // Use the same Adam logic as in `nn`. Inline to avoid exposing
-                // the helper publicly.
-                let state = &mut self.embeddings_state;
-                if state.m.shape() != self.embeddings.shape() {
-                    state.m = Array2::zeros(self.embeddings.raw_dim());
-                    state.v = Array2::zeros(self.embeddings.raw_dim());
-                    state.t = 0;
-                }
-                state.t += 1;
-                let bc1 = 1.0 - beta1.powi(state.t as i32);
-                let bc2 = 1.0 - beta2.powi(state.t as i32);
-                for ((p, g), (m, v)) in self
-                    .embeddings
-                    .iter_mut()
-                    .zip(self.embeddings_grad.iter())
-                    .zip(state.m.iter_mut().zip(state.v.iter_mut()))
-                {
-                    *m = beta1 * *m + (1.0 - beta1) * *g;
-                    *v = beta2 * *v + (1.0 - beta2) * *g * *g;
-                    let m_hat = *m / bc1;
-                    let v_hat = *v / bc2;
-                    *p -= lr * m_hat / (v_hat.sqrt() + eps);
-                }
+                crate::nn::adam_step2(
+                    &mut self.embeddings,
+                    &self.embeddings_grad,
+                    &mut self.embeddings_state,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                );
             }
         }
         self.embeddings_grad.fill(0.0);
@@ -1280,13 +1106,6 @@ impl Model {
         }
         self.final_norm.apply_grads(opt);
         self.lm_head.apply_grads(opt);
-
-        // Re-tie: keep the LM head's weight matrix equal to the (now updated)
-        // embeddings. The head's own weight gradient was zeroed above, so its
-        // Adam state for the weight matrix never moves.
-        if self.tie_embeddings {
-            self.sync_lm_head_from_embeddings();
-        }
     }
 
     // -- generation -----------------------------------------------------------
@@ -1351,15 +1170,7 @@ impl Model {
         let mut logits = logits_opt.expect("prompt is non-empty");
         let mut out: Vec<usize> = Vec::new();
         for _ in 0..cfg.max_new_tokens {
-            let mut next = sample_from_logits(&logits, cfg, rng);
-            // Avoid an immediately empty completion when the very first choice
-            // is `<stop>`. Prefer the best non-stop token once, then allow
-            // normal stopping behavior on subsequent steps.
-            if out.is_empty() && next == stop {
-                if let Some(alt) = argmax_excluding(&logits, stop) {
-                    next = alt;
-                }
-            }
+            let next = sample_from_logits(&logits, cfg, rng);
             if next == stop {
                 break;
             }
@@ -1420,21 +1231,6 @@ mod tests {
             l0,
             last
         );
-    }
-
-    #[test]
-    fn save_load_roundtrip_bincode() {
-        crate::nn::seed(2);
-        let dir = std::env::temp_dir().join("blip_test_model.bin");
-        let mut m = Model::new(8, 1, 2);
-        m.register_token("x");
-        m.initialize_embeddings();
-        m.save(dir.to_str().unwrap()).unwrap();
-        let m2 = Model::load(dir.to_str().unwrap()).unwrap();
-        assert_eq!(m2.vocab_size(), m.vocab_size());
-        assert_eq!(m2.embedding_dim(), m.embedding_dim());
-        assert_eq!(m2.n_heads(), m.n_heads());
-        let _ = std::fs::remove_file(dir);
     }
 
     #[test]
@@ -1502,63 +1298,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn generation_avoids_immediate_stop_on_first_token() {
-        crate::nn::seed(6);
-        let mut m = Model::new(8, 1, 2);
-        m.register_token("a");
-        m.initialize_embeddings();
-
-        // Force deterministic logits where `<stop>` is highest and "a" is
-        // second-highest regardless of prompt state.
-        m.lm_head.weights.fill(0.0);
-        m.lm_head.bias.fill(-10.0);
-        let stop = m.get_stop_token_id();
-        let a = m.get_token_id("a").unwrap();
-        m.lm_head.bias[stop] = 10.0;
-        m.lm_head.bias[a] = 5.0;
-
-        let cfg = SamplingConfig::greedy(1);
-        let user = m.get_user_token_id();
-        let mut rng = ChaCha12Rng::seed_from_u64(0);
-        let ids = m.generate_token_ids(&[user], &cfg, &mut rng).unwrap();
-        assert_eq!(ids, vec![a]);
-    }
-
-    #[test]
-    fn tied_embeddings_keep_lm_head_in_sync_after_step() {
-        crate::nn::seed(7);
-        let mut m = Model::new(8, 1, 2);
-        for tok in ["i", "am", "blip"] {
-            m.register_token(tok);
-        }
-        m.set_tie_embeddings(true);
-        m.initialize_embeddings();
-        assert!(m.tie_embeddings);
-
-        // After init, lm_head.weights mirrors the embedding table.
-        assert_eq!(m.lm_head.weights, m.embeddings);
-
-        let user = m.get_user_token_id();
-        let i = m.get_token_id("i").unwrap();
-        let am = m.get_token_id("am").unwrap();
-        let blip = m.get_token_id("blip").unwrap();
-        let stop = m.get_stop_token_id();
-
-        let _ = m.train_sequence(&[user, i, am, blip, stop]);
-
-        // Both gradient buffers are non-zero before apply_grads.
-        let head_grad_norm: f32 = m.lm_head.w_grad.iter().map(|v| v * v).sum();
-        let emb_grad_norm: f32 = m.embeddings_grad.iter().map(|v| v * v).sum();
-        assert!(head_grad_norm > 0.0, "lm_head should have weight grads");
-        assert!(emb_grad_norm > 0.0, "embeddings should have grads");
-
-        m.apply_grads(crate::nn::Optimizer::adam(0.01));
-
-        // After the step, lm_head.weights still equals embeddings (re-tied),
-        // and the head weight grad has been folded in / zeroed.
-        assert_eq!(m.lm_head.weights, m.embeddings);
-        let head_grad_after: f32 = m.lm_head.w_grad.iter().map(|v| v * v).sum();
-        assert_eq!(head_grad_after, 0.0);
-    }
 }
