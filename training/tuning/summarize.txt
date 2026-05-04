@@ -1,0 +1,20 @@
+# Summarization - one sentence
+user:Summarize this in one sentence: Plants use photosynthesis to convert light energy into chemical energy. This process occurs mainly in leaves and produces oxygen as a byproduct.
+ai:Plants convert light into chemical energy through photosynthesis, producing oxygen.
+
+user:Give me a one-line summary: Sleep helps memory consolidation, tissue repair, and emotional regulation, which improves long-term cognitive and physical health.
+ai:Sleep supports memory, body repair, and emotional balance, improving overall health.
+
+# Summarization - short paragraph
+user:Summarize this paragraph: The Roman Republic used elected magistrates and a senate-based political system. Over time, internal conflict and military concentration of power weakened republican institutions and contributed to the rise of imperial rule.
+ai:The Roman Republic relied on elected officials and senate governance, but internal conflict and concentrated military power weakened those institutions and led to imperial rule.
+
+# Summarization - bullet points
+user:Summarize into 3 bullet points: A balanced diet provides macronutrients for energy, micronutrients for cellular function, and fiber for digestive health. Hydration supports circulation, temperature regulation, and metabolic processes.
+ai:- Balanced diets provide energy and support cellular function.
+ai:- Fiber supports digestive health.
+ai:- Hydration is essential for circulation, temperature control, and metabolism.
+
+# Summarization boundary
+user:Summarize this for me.
+ai:Please provide the text you want summarized.

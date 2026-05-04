@@ -118,7 +118,7 @@ struct TrainingArgs {
     #[arg(long, default_value = "256", help = "Target sequence length (tokens) for pretraining corpus loader")]
     pub seq_length: usize,
 
-    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*", "training/pretraining/books/*"], help = "Pretraining (corpus) files to use")]
+    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*"], help = "Pretraining (corpus) files to use")]
     pub pretraining_files: Vec<String>,
 
     #[arg(short = 't', long = "tuning-files", default_values = vec!["training/tuning/*"], help = "Tuning files to use")]
@@ -232,21 +232,16 @@ fn main() {
     let model = Model::new(args.embedding_dim, args.depth, args.n_heads);
     let mut training_data = TrainingData::new(model);
 
-    // Preload all datasets once so vocabulary is complete before embeddings init.
+    // Build vocabulary from pretraining data first, so min_count pruning applies
+    // only to corpus-derived tokens.
     for file_name in &pretraining_files {
         if let Err(e) = training_data.load(file_name) {
             eprintln!("Error loading pretraining data from {}: {}", file_name, e);
             return;
         }
     }
-    for file_name in &tuning_files {
-        if let Err(e) = training_data.load(file_name) {
-            eprintln!("Error loading tuning data from {}: {}", file_name, e);
-            return;
-        }
-    }
     println!(
-        "Loaded {} prompts for vocabulary build, vocab = {}",
+        "Loaded {} pretraining prompts for vocabulary build, vocab = {}",
         training_data.num_prompts(),
         training_data.get_model().vocab_size()
     );
@@ -260,6 +255,22 @@ fn main() {
             training_data.get_model().vocab_size()
         );
     }
+
+    // Clear temporary pretraining prompts, then add tuning data to vocabulary
+    // after pruning so tuning-only tokens are never removed by min_count.
+    training_data.clear_prompts();
+    for file_name in &tuning_files {
+        if let Err(e) = training_data.load(file_name) {
+            eprintln!("Error loading tuning data from {}: {}", file_name, e);
+            return;
+        }
+    }
+    println!(
+        "Loaded {} tuning prompts for vocabulary build after pruning, vocab = {}",
+        training_data.num_prompts(),
+        training_data.get_model().vocab_size()
+    );
+    training_data.clear_prompts();
 
     training_data.get_model_mut().initialize_embeddings();
 

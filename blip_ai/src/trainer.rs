@@ -497,8 +497,10 @@ struct ProgressLine {
 impl ProgressLine {
     fn print(&mut self, message: &str) {
         let mut stdout = io::stdout();
-        let padding = self.last_len.saturating_sub(message.len());
-        let _ = write!(stdout, "\r{}{}", message, " ".repeat(padding));
+        if self.last_len > 0 {
+            let _ = write!(stdout, "\r{}\r", " ".repeat(self.last_len));
+        }
+        let _ = write!(stdout, "{}", message);
         let _ = stdout.flush();
         self.last_len = message.len();
     }

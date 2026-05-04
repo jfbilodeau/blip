@@ -4,6 +4,8 @@ use clap::Parser;
 use rand::SeedableRng;
 use rand_chacha::ChaCha12Rng;
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -22,7 +24,7 @@ struct BlipArgs {
     #[arg(short = 'p', long)]
     pub prompt: Option<String>,
 
-    #[arg(short = 'm', long, default_value = "64")]
+    #[arg(short = 'm', long, default_value = "1024", help = "Maximum number of new tokens to generate")]
     pub max_new_tokens: usize,
 
     #[arg(short = 't', long, default_value = "0.0", help = "Sampling temperature; 0 = greedy")]
@@ -102,6 +104,16 @@ fn run_once(model: &Model, prompt: &str, cfg: &SamplingConfig, seed: u64) {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let exiting = Arc::new(AtomicBool::new(false));
+    let exiting_for_handler = Arc::clone(&exiting);
+    ctrlc::set_handler(move || {
+        if !exiting_for_handler.swap(true, Ordering::SeqCst) {
+            eprintln!("\nCtrl+C exit");
+        }
+        std::process::exit(0);
+    })
+    .expect("Failed to install Ctrl+C handler");
 
     let args = BlipArgs::parse();
 

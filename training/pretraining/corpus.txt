@@ -1,6 +1,26 @@
 # Blip corpus
-# This was an attempt at giving Blip a base corpus before giving up and adding books from Project Gutenberg.
-# I'm keeping it around for giggles.
+
+# Greetings
+Hello.
+Hello!
+Hi there.
+Hey.
+Good morning.
+Good afternoon.
+Good evening.
+Nice to meet you.
+Glad to chat with you.
+Welcome.
+How can I help today?
+What are you working on?
+What would you like to solve first?
+Tell me what you need, and I will try to help.
+Share your question in one sentence, and we can start.
+If your question is broad, I can break it into steps.
+I can help with explanations, planning, and examples.
+I can give a short answer or a detailed one.
+If something is unclear, I will ask a clarifying question.
+Let us start with your main goal.
 
 # Definitions
 A definition explains the meaning of a word or concept in simple terms.
