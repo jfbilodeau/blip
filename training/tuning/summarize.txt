@@ -1,20 +1,29 @@
-# Summarization - one sentence
+# Summarization tuning data
+
+# One sentence summary
 user:Summarize this in one sentence: Plants use photosynthesis to convert light energy into chemical energy. This process occurs mainly in leaves and produces oxygen as a byproduct.
-ai:Plants convert light into chemical energy through photosynthesis, producing oxygen.
+ai:Plants use photosynthesis in leaves to convert light into chemical energy and release oxygen.
 
 user:Give me a one-line summary: Sleep helps memory consolidation, tissue repair, and emotional regulation, which improves long-term cognitive and physical health.
-ai:Sleep supports memory, body repair, and emotional balance, improving overall health.
+ai:Sleep supports memory, body repair, and emotional balance, improving long-term health.
 
-# Summarization - short paragraph
+# Short paragraph summary
 user:Summarize this paragraph: The Roman Republic used elected magistrates and a senate-based political system. Over time, internal conflict and military concentration of power weakened republican institutions and contributed to the rise of imperial rule.
-ai:The Roman Republic relied on elected officials and senate governance, but internal conflict and concentrated military power weakened those institutions and led to imperial rule.
+ai:The Roman Republic relied on elected officials and senate governance, but internal conflict and concentrated military power weakened republican institutions and paved the way for imperial rule.
 
-# Summarization - bullet points
+user:Summarize this paragraph: Renewable energy sources such as wind and solar reduce dependence on fossil fuels, but they require grid upgrades, better storage, and careful planning to handle variability.
+ai:Wind and solar can reduce fossil fuel dependence, but reliable adoption requires storage, grid modernization, and careful planning for variable output.
+
+# Structured summary requests
 user:Summarize into 3 bullet points: A balanced diet provides macronutrients for energy, micronutrients for cellular function, and fiber for digestive health. Hydration supports circulation, temperature regulation, and metabolic processes.
-ai:- Balanced diets provide energy and support cellular function.
-ai:- Fiber supports digestive health.
-ai:- Hydration is essential for circulation, temperature control, and metabolism.
+ai:- balanced diets provide energy and support cellular function; - fiber supports digestive health; - hydration supports circulation, temperature control, and metabolism.
 
-# Summarization boundary
+user:Summarize in 2 points: Effective project delivery requires clear scope, realistic timelines, and regular communication. Teams that track risks early and review progress frequently tend to reduce rework and delays.
+ai:- clear scope, realistic planning, and regular communication improve project delivery; - early risk tracking and frequent progress reviews reduce rework and delays.
+
+# Boundary behavior
 user:Summarize this for me.
 ai:Please provide the text you want summarized.
+
+user:Can you summarize something if I do not give the text?
+ai:I need the source text before I can summarize it.

@@ -258,6 +258,142 @@ Even numbers can be divided by two.
 Odd numbers cannot be divided evenly by two.
 If all humans are mammals, and Alex is human, then Alex is a mammal.
 If A is greater than B, and B is greater than C, then A is greater than C.
+
+# Software Engineering
+Requirements describe what a system should do and what constraints it must respect.
+Design decisions trade off simplicity, performance, and maintainability.
+Modular code is easier to test and reason about than tightly coupled code.
+Naming should be clear enough that intent is obvious without extra comments.
+Code reviews help detect defects and spread knowledge across a team.
+Automated tests reduce regressions during refactoring.
+Unit tests focus on small isolated behaviors.
+Integration tests verify interactions between components.
+End to end tests validate complete user flows.
+A failing test should be reproducible and actionable.
+Refactoring changes structure while preserving behavior.
+Technical debt accumulates when short-term speed is prioritized over long-term quality.
+Observability includes logs, metrics, and traces.
+Latency measures response time for a request.
+Throughput measures how many requests are handled over time.
+Caching can improve speed when repeated reads dominate writes.
+Idempotent operations can be retried safely.
+Rate limiting protects systems from overload.
+Retries should use backoff to avoid amplifying failures.
+Timeouts prevent requests from hanging indefinitely.
+
+# Security Basics
+Authentication verifies identity.
+Authorization decides what an authenticated identity may do.
+Least privilege grants only the permissions required for a task.
+Input validation reduces the risk of malformed or hostile input.
+Parameterized queries help prevent injection attacks.
+Secrets should not be hardcoded in source code.
+Encryption protects data in transit and at rest.
+Hashing is used for one-way integrity checks.
+Multi-factor authentication adds a second proof of identity.
+Security monitoring can detect suspicious patterns early.
+Patch management reduces exposure to known vulnerabilities.
+Backups support recovery after accidental loss or incidents.
+A threat model identifies assets, risks, and likely attack paths.
+Security is strongest when built into design rather than added late.
+
+# Project Management
+A project scope defines what is included and what is excluded.
+Milestones mark significant checkpoints in a delivery plan.
+Dependencies describe tasks that must happen before others.
+Risk registers track potential problems and mitigation plans.
+Stakeholders are people affected by the outcome of a project.
+Clear acceptance criteria reduce ambiguity in delivery.
+Incremental delivery provides feedback earlier than large releases.
+Retrospectives help teams improve process over time.
+Estimations are more reliable when tasks are well defined.
+Communication plans keep teams aligned on goals and progress.
+Prioritization should reflect value, urgency, and effort.
+A blocker is any issue that prevents forward progress.
+
+# Writing and Explanation
+A good explanation starts with context before details.
+Examples make abstract ideas easier to understand.
+Definitions should use plain language when possible.
+Comparisons help readers map new ideas to familiar ones.
+A summary captures the main points without repeating every detail.
+A conclusion should connect back to the original question.
+Short sentences can improve readability for complex topics.
+Transition words clarify relationships between ideas.
+Ambiguous phrasing can cause readers to misinterpret intent.
+Consistent terminology reduces confusion.
+
+# Everyday Planning
+Breaking work into small tasks makes progress easier to track.
+A checklist helps prevent missing important steps.
+Timeboxing limits how long a task can consume attention.
+Prioritizing by impact helps focus on high-value work.
+Buffers in a schedule reduce the effect of surprises.
+Reviewing progress weekly supports continuous adjustment.
+Clear next actions reduce procrastination.
+Delegation works best with explicit expectations.
+A plan should be updated when assumptions change.
+Done criteria should be agreed on before execution.
+
+# Economics Basics
+Supply and demand influence market prices.
+Inflation describes a general rise in prices over time.
+Opportunity cost is the value of the best alternative forgone.
+Productivity measures output per unit of input.
+Diversification can reduce investment risk.
+Interest rates affect borrowing and saving behavior.
+Comparative advantage explains why trade can benefit all parties.
+Marginal analysis examines small changes in cost and benefit.
+Fixed costs do not change with output in the short term.
+Variable costs change as production volume changes.
+
+# Environment and Climate
+Greenhouse gases trap heat in the atmosphere.
+Carbon dioxide is a major greenhouse gas from human activity.
+Mitigation reduces the causes of climate change.
+Adaptation reduces harm from climate impacts.
+Energy efficiency lowers energy use for the same service.
+Reforestation can help restore ecosystems and store carbon.
+Biodiversity supports resilience in natural systems.
+Pollution can affect air quality, water quality, and health.
+Sustainable practices balance present needs with future needs.
+Conservation protects habitats and species.
+
+# Learning Strategies
+Spaced repetition improves long-term retention.
+Active recall strengthens memory more than passive review.
+Interleaving mixes topics to improve transfer of knowledge.
+Feedback is most useful when it is specific and timely.
+Practice with varied examples improves adaptability.
+Teaching a concept can reveal gaps in understanding.
+Mistakes are informative when analyzed carefully.
+Clear goals improve motivation and direction.
+Reflection helps consolidate lessons after practice.
+Small daily progress compounds over time.
+
+# Decision Making
+Decision quality depends on both information and process.
+Good decisions can still have bad outcomes because of uncertainty.
+Expected value combines probability and impact.
+Scenario planning explores plausible futures.
+Sensitivity analysis tests how outcomes change with assumptions.
+Trade-offs are unavoidable when goals conflict.
+A reversible decision can often be made faster.
+An irreversible decision usually deserves more analysis.
+Documenting assumptions helps future review.
+Postmortems identify what happened and why.
+
+# Collaboration
+Shared goals increase team cohesion.
+Psychological safety encourages people to raise concerns early.
+Role clarity reduces duplicated work.
+Conflict can be productive when focused on ideas rather than people.
+Handovers are smoother with clear written context.
+Meeting agendas improve focus and efficiency.
+Decisions should be recorded with rationale.
+Ownership improves accountability for outcomes.
+Cross-functional teams combine complementary expertise.
+Respectful communication supports long-term collaboration.
 Counting starts at one and increases by one each step.
 
 # Micro‑Stories

@@ -1,60 +1,61 @@
 # Blip equivalence pretraining corpus
-# Line-based factual pairs for semantic normalization.
-# Blank lines separate small groups for readability.
+# Compact, high-signal mappings for normalization.
 
 # Number words and digits
 zero equals 0.
-0 equals zero.
 one equals 1.
-1 equals one.
 two equals 2.
-2 equals two.
 three equals 3.
-3 equals three.
 four equals 4.
-4 equals four.
 five equals 5.
-5 equals five.
 six equals 6.
-6 equals six.
 seven equals 7.
-7 equals seven.
 eight equals 8.
-8 equals eight.
 nine equals 9.
-9 equals nine.
 ten equals 10.
-10 equals ten.
 
-# Alternate verbal forms
+0 means zero.
+1 means one.
+2 means two.
+3 means three.
+4 means four.
+5 means five.
+6 means six.
+7 means seven.
+8 means eight.
+9 means nine.
+10 means ten.
+
+# Alternate quantity phrases
 nothing means zero.
-no items means zero items.
 a single item means one item.
 a pair means two.
 a dozen means 12.
 half a dozen means 6.
 
-# Ordinals and numeric forms
+# Ordinals
 first equals 1st.
-1st equals first.
 second equals 2nd.
-2nd equals second.
 third equals 3rd.
-3rd equals third.
 fourth equals 4th.
-4th equals fourth.
 fifth equals 5th.
-5th equals fifth.
+
+1st means first.
+2nd means second.
+3rd means third.
+4th means fourth.
+5th means fifth.
 
 # Fractions and decimals
 one half equals 0.5.
-0.5 equals one half.
 one quarter equals 0.25.
-0.25 equals one quarter.
 three quarters equals 0.75.
-0.75 equals three quarters.
 one tenth equals 0.1.
-0.1 equals one tenth.
+
+0.5 means one half.
+0.25 means one quarter.
+0.75 means three quarters.
+0.1 means one tenth.
 
 # Basic arithmetic paraphrases
 two plus two equals four.
@@ -76,63 +77,68 @@ there are five chairs means there are 5 chairs.
 
 # Time and date abbreviations
 seconds abbreviates as sec.
-sec means seconds.
 minutes abbreviates as min.
-min means minutes.
 hours abbreviates as hr.
-hr means hours.
 milliseconds abbreviates as ms.
+
+sec means seconds.
+min means minutes.
+hr means hours.
 ms means milliseconds.
 
-# Common unit equivalences
+# Unit abbreviations
 kilogram abbreviates as kg.
-kg means kilogram.
 gram abbreviates as g.
-g means gram.
 kilometer abbreviates as km.
-km means kilometer.
 meter abbreviates as m.
-m means meter.
 centimeter abbreviates as cm.
-cm means centimeter.
 liter abbreviates as l.
-l means liter.
 milliliter abbreviates as ml.
+
+kg means kilogram.
+g means gram.
+km means kilometer.
+m means meter.
+cm means centimeter.
+l means liter.
 ml means milliliter.
 
 # Computer size units
 kilobyte abbreviates as kb.
-kb means kilobyte.
 megabyte abbreviates as mb.
-mb means megabyte.
 gigabyte abbreviates as gb.
-gb means gigabyte.
 terabyte abbreviates as tb.
+
+kb means kilobyte.
+mb means megabyte.
+gb means gigabyte.
 tb means terabyte.
 
 # Boolean and polarity
 true means yes.
-yes means true.
 false means no.
-no means false.
 enabled means on.
-on means enabled.
 disabled means off.
+
+yes often means true.
+no often means false.
+on means enabled.
 off means disabled.
 
 # Common language equivalences
 start means begin.
-begin means start.
 end means finish.
-finish means end.
 quick means fast.
-fast means quick.
 small means little.
-little means small.
 large means big.
+
+begin means start.
+finish means end.
+fast means quick.
+little means small.
 big means large.
 
-# Directional equivalences
+# Directional opposites
 left is opposite of right.
 right is opposite of left.
 up is opposite of down.
@@ -140,46 +146,42 @@ down is opposite of up.
 
 # Weekday abbreviations
 monday abbreviates as mon.
-mon means monday.
 tuesday abbreviates as tue.
-tue means tuesday.
 wednesday abbreviates as wed.
-wed means wednesday.
 thursday abbreviates as thu.
-thu means thursday.
 friday abbreviates as fri.
+
+mon means monday.
+tue means tuesday.
+wed means wednesday.
+thu means thursday.
 fri means friday.
 
 # Month abbreviations
 january abbreviates as jan.
-jan means january.
 february abbreviates as feb.
-feb means february.
 march abbreviates as mar.
-mar means march.
 april abbreviates as apr.
-apr means april.
 august abbreviates as aug.
-aug means august.
 september abbreviates as sep.
-sep means september.
 october abbreviates as oct.
-oct means october.
 november abbreviates as nov.
-nov means november.
 december abbreviates as dec.
+
+jan means january.
+feb means february.
+mar means march.
+apr means april.
+aug means august.
+sep means september.
+oct means october.
+nov means november.
 dec means december.
 
-# Bidirectional Q and A style
-q: what is two
-a: two is 2.
-q: what is 2
-a: 2 is two.
-q: what is second
-a: second is 2nd.
-q: what is 2nd
-a: 2nd is second.
-q: what is half
-a: half is 0.5.
-q: what is 0.5
-a: 0.5 is one half.
+# Short normalization pairs
+what is two means two is 2.
+what is 2 means 2 is two.
+what is second means second is 2nd.
+what is 2nd means 2nd is second.
+what is half means half is 0.5.
+what is 0.5 means 0.5 is one half.
