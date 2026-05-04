@@ -36,9 +36,6 @@ struct BlipArgs {
 
     #[arg(long, default_value = "0", help = "RNG seed for sampling (0 = random)")]
     pub seed: u64,
-
-    #[arg(long, default_value = "true", help = "Interactive REPL mode")]
-    pub repl: bool,
 }
 
 /// Build the inference token prompt: `[<user>, ...user_tokens, <ai>]`.
@@ -119,7 +116,10 @@ fn main() {
         max_new_tokens: args.max_new_tokens,
     };
 
-    if args.repl {
+    if let Some(prompt) = args.prompt.as_deref() {
+        println!("Prompt: {}", prompt);
+        run_once(&model, prompt, &cfg, args.seed);
+    } else {
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
         loop {
@@ -143,10 +143,6 @@ fn main() {
             }
             run_once(&model, trimmed, &cfg, args.seed);
         }
-    } else {
-        let prompt = args.prompt.unwrap_or_else(|| "Who are you?".to_string());
-        println!("Prompt: {}", prompt);
-        run_once(&model, &prompt, &cfg, args.seed);
     }
 }
 

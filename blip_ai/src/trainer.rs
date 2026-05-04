@@ -318,6 +318,8 @@ impl TrainingData {
         let mut epoch_rng = ChaCha12Rng::seed_from_u64(cfg.seed.wrapping_add(1));
         let mut indices: Vec<usize> = (0..train_seqs.len()).collect();
         let mut progress_line = ProgressLine::default();
+        let training_start = Instant::now();
+        let mut ema_step_secs: Option<f32> = None;
         let deterministic_mode = cfg.deterministic;
         if deterministic_mode {
             info!(
@@ -329,6 +331,7 @@ impl TrainingData {
             indices.shuffle(&mut epoch_rng);
             let mut total_loss = 0.0_f32;
             let mut count = 0usize;
+            let mut epoch_step = 0usize;
             let epoch_start = Instant::now();
             let mut last_progress_update = epoch_start.checked_sub(Duration::from_secs(1)).unwrap_or(epoch_start);
             let progress_interval = if deterministic_mode {
@@ -339,6 +342,7 @@ impl TrainingData {
             let batch_size = cfg.batch_size.max(1);
 
             for batch in indices.chunks(batch_size) {
+                let step_start = Instant::now();
                 if deterministic_mode {
                     self.model.zero_all_grads();
                     let mut batch_loss = 0.0_f32;
@@ -388,6 +392,13 @@ impl TrainingData {
                     grad_clip: cfg.grad_clip,
                 });
                 step += 1;
+                epoch_step += 1;
+
+                let step_secs = step_start.elapsed().as_secs_f32().max(1e-6);
+                ema_step_secs = Some(match ema_step_secs {
+                    Some(prev) => prev * 0.9 + step_secs * 0.1,
+                    None => step_secs,
+                });
 
                 let should_update_progress = count == train_seqs.len()
                     || last_progress_update.elapsed() >= progress_interval;
@@ -399,13 +410,14 @@ impl TrainingData {
                         .as_ref()
                         .map(|s| s.lr_at(step, total_steps, cfg.learning_rate))
                         .unwrap_or(cfg.learning_rate);
-                    let elapsed = epoch_start.elapsed();
-                    let elapsed_secs = elapsed.as_secs_f32();
-                    let seqs_per_sec = (count as f32 / elapsed_secs.max(1e-6)).max(1e-6);
-                    let remaining = train_seqs.len().saturating_sub(count);
-                    let eta_secs = remaining as f32 / seqs_per_sec;
+                    let elapsed_secs = training_start.elapsed().as_secs_f32();
+                    let avg_step_secs = ema_step_secs.unwrap_or(step_secs);
+                    let epoch_steps_left = steps_per_epoch.saturating_sub(epoch_step);
+                    let total_steps_left = total_steps.saturating_sub(step);
+                    let epoch_eta_secs = epoch_steps_left as f32 * avg_step_secs;
+                    let total_eta_secs = total_steps_left as f32 * avg_step_secs;
                     let message = format!(
-                        "Epoch {}/{} [{:>5.1}%] {}/{} seq - avg loss {:.4} - lr {:.6} - elapsed {:.1}s - eta {:.1}s",
+                        "Epoch {}/{} [{:>5.1}%] {}/{} seq - avg loss {:.4} - lr {:.6} - elapsed {} - epoch ETA {} - total ETA {}",
                         epoch + 1,
                         cfg.num_epochs,
                         percent,
@@ -413,8 +425,9 @@ impl TrainingData {
                         train_seqs.len(),
                         avg_loss,
                         current_lr,
-                        elapsed_secs,
-                        eta_secs
+                        format_duration_short(elapsed_secs),
+                        format_duration_short(epoch_eta_secs),
+                        format_duration_short(total_eta_secs)
                     );
                     if deterministic_mode {
                         println!("{}", message);
@@ -499,6 +512,19 @@ impl ProgressLine {
         let _ = write!(stdout, "\r{}\r", " ".repeat(self.last_len));
         let _ = stdout.flush();
         self.last_len = 0;
+    }
+}
+
+fn format_duration_short(total_secs: f32) -> String {
+    let secs = total_secs.max(0.0).round() as u64;
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
     }
 }
 
