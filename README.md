@@ -21,12 +21,37 @@ cross-entropy.
 
 ## Quickstart
 
+### Training from scratch
+
 Train with the default corpus globs (`training/pretraining/*` and `training/tuning/*`):
 
 ```pwsh
 cargo run --release -p blip_trainer -- `
   -o models/basic.json
 ```
+
+### Resuming training from a checkpoint
+
+Resume full pipeline (pretraining + tuning) from an existing checkpoint:
+
+```pwsh
+cargo run --release -p blip_trainer -- `
+  --resume-from models/basic.json `
+  -o models/basic.json
+```
+
+Resume with tuning only (skip pretraining):
+
+```pwsh
+cargo run --release -p blip_trainer -- `
+  --resume-from models/basic.json `
+  --resume-skip-pretraining true `
+  -o models/basic.json
+```
+
+**Note:** When resuming, the checkpoint's vocabulary is frozen (no new tokens added). The `--min-count` flag and vocab rebuild phases are automatically skipped. Architecture dimensions (`-e`, `-d`, `--n-heads`) from CLI are ignored in favor of the loaded checkpoint's architecture; a warning is printed if they differ.
+
+### Inference
 
 Generate a one-shot response:
 
@@ -66,6 +91,8 @@ cargo run --release -p blip -- -t 0.8 --seed 1
 | `-p, --pretraining-files` | `training/pretraining/*` | Pretraining corpus file globs, trained without `<stop>` |
 | `-t, --tuning-files`  | `training/tuning/*` | Chat-tuning file globs, trained with `<stop>` |
 | `-o, --output-file`  | `models/basic.json` | Output checkpoint (`.json` only) |
+| `--resume-from`      | none                  | Resume training from existing checkpoint (frozen vocab, skips build) |
+| `--resume-skip-pretraining` | false          | When resuming, skip pretraining phase and run tuning only |
 
 ## Inference flags
 

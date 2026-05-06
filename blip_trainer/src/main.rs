@@ -112,20 +112,26 @@ struct TrainingArgs {
     #[arg(long, default_value = "10", help = "Save checkpoint every N epochs (0 = end only)")]
     pub checkpoint_every: usize,
 
-    #[arg(long, default_value = "1", help = "Drop tokens whose usage_count is below this (specials always kept)")]
+    #[arg(long, default_value = "1", help = "Drop corpus (pre-training) tokens whose usage_count is below this (specials always kept)")]
     pub min_count: u32,
 
     #[arg(long, default_value = "256", help = "Target sequence length (tokens) for pretraining corpus loader")]
     pub seq_length: usize,
 
-    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*"], help = "Pretraining (corpus) files to use")]
+    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*"], help = "Pretraining (corpus) files to use. Wild cards are supported but does not recurse in subdirectories.")]
     pub pretraining_files: Vec<String>,
 
-    #[arg(short = 't', long = "tuning-files", default_values = vec!["training/tuning/*"], help = "Tuning files to use")]
+    #[arg(short = 't', long = "tuning-files", default_values = vec!["training/tuning/*"], help = "Tuning files to use. Wild cards are supported but does not recurse in subdirectories.")]
     pub tuning_files: Vec<String>,
 
     #[arg(short = 'o', long, default_value = "models/basic.json", help = "Output path (.json only).")]
     pub output_file: String,
+
+    #[arg(long = "resume-from", help = "Resume training from an existing .json checkpoint")]
+    pub resume_from: Option<String>,
+
+    #[arg(long, default_value = "false", help = "When resuming, skip the pretraining phase and run tuning only")]
+    pub resume_skip_pretraining: bool,
 }
 
 fn has_glob_meta(pattern: &str) -> bool {
@@ -224,16 +230,56 @@ fn main() {
     println!(" - seq_length:           {} (pretraining)", args.seq_length);
     println!(" - pretraining:          {:?}", pretraining_files);
     println!(" - tuning:               {:?}", tuning_files);
+    println!(" - resume_from:          {:?}", args.resume_from);
+    println!(" - resume_skip_pretrain: {}", args.resume_skip_pretraining);
     println!(" - output:               {}", args.output_file);
     println!();
 
     let program_start = std::time::Instant::now();
 
-    let mut model = Model::new(args.embedding_dim, args.depth, args.n_heads);
+    let resuming = args.resume_from.is_some();
+    let mut model = if let Some(checkpoint_path) = args.resume_from.as_deref() {
+        match Model::load(checkpoint_path) {
+            Ok(loaded) => {
+                if loaded.embedding_dim() != args.embedding_dim
+                    || loaded.depth() != args.depth
+                    || loaded.n_heads() != args.n_heads
+                {
+                    println!(
+                        "Warning: checkpoint architecture ({}, {}, {}) differs from CLI ({}, {}, {}). Using checkpoint architecture.",
+                        loaded.embedding_dim(),
+                        loaded.depth(),
+                        loaded.n_heads(),
+                        args.embedding_dim,
+                        args.depth,
+                        args.n_heads
+                    );
+                }
+                println!(
+                    "Resuming from checkpoint: {} (vocab={}, embed_dim={}, depth={}, heads={})",
+                    checkpoint_path,
+                    loaded.vocab_size(),
+                    loaded.embedding_dim(),
+                    loaded.depth(),
+                    loaded.n_heads()
+                );
+                loaded
+            }
+            Err(e) => {
+                eprintln!("Error loading checkpoint from {}: {}", checkpoint_path, e);
+                return;
+            }
+        }
+    } else {
+        Model::new(args.embedding_dim, args.depth, args.n_heads)
+    };
+    let model_embedding_dim = model.embedding_dim();
+    let model_depth = model.depth();
+    let model_n_heads = model.n_heads();
     model.set_training_metadata(TrainingMetadata {
-        embedding_dim: args.embedding_dim,
-        depth: args.depth,
-        n_heads: args.n_heads,
+        embedding_dim: model_embedding_dim,
+        depth: model_depth,
+        n_heads: model_n_heads,
         pretrain_epochs: args.pretrain_epochs,
         pretrain_lr: args.pretrain_lr,
         pretrain_batch_size: args.pretrain_batch_size,
@@ -258,47 +304,53 @@ fn main() {
     });
     let mut training_data = TrainingData::new(model);
 
-    // Build vocabulary from pretraining data first, so min_count pruning applies
-    // only to corpus-derived tokens.
-    for file_name in &pretraining_files {
-        if let Err(e) = training_data.load(file_name) {
-            eprintln!("Error loading pretraining data from {}: {}", file_name, e);
-            return;
+    if !resuming {
+        // Build vocabulary from pretraining data first, so min_count pruning applies
+        // only to corpus-derived tokens.
+        for file_name in &pretraining_files {
+            if let Err(e) = training_data.load(file_name) {
+                eprintln!("Error loading pretraining data from {}: {}", file_name, e);
+                return;
+            }
         }
-    }
-    println!(
-        "Loaded {} pretraining prompts for vocabulary build, vocab = {}",
-        training_data.num_prompts(),
-        training_data.get_model().vocab_size()
-    );
-
-    if args.min_count > 1 {
-        let removed = training_data.trim_vocab(args.min_count);
         println!(
-            "Trimmed {} rare tokens (min_count={}), vocab = {}",
-            removed,
-            args.min_count,
+            "Loaded {} pretraining prompts for vocabulary build, vocab = {}",
+            training_data.num_prompts(),
             training_data.get_model().vocab_size()
         );
-    }
 
-    // Clear temporary pretraining prompts, then add tuning data to vocabulary
-    // after pruning so tuning-only tokens are never removed by min_count.
-    training_data.clear_prompts();
-    for file_name in &tuning_files {
-        if let Err(e) = training_data.load(file_name) {
-            eprintln!("Error loading tuning data from {}: {}", file_name, e);
-            return;
+        if args.min_count > 1 {
+            let removed = training_data.trim_vocab(args.min_count);
+            println!(
+                "Trimmed {} rare tokens (min_count={}), vocab = {}",
+                removed,
+                args.min_count,
+                training_data.get_model().vocab_size()
+            );
         }
-    }
-    println!(
-        "Loaded {} tuning prompts for vocabulary build after pruning, vocab = {}",
-        training_data.num_prompts(),
-        training_data.get_model().vocab_size()
-    );
-    training_data.clear_prompts();
 
-    training_data.get_model_mut().initialize_embeddings();
+        // Clear temporary pretraining prompts, then add tuning data to vocabulary
+        // after pruning so tuning-only tokens are never removed by min_count.
+        training_data.clear_prompts();
+        for file_name in &tuning_files {
+            if let Err(e) = training_data.load(file_name) {
+                eprintln!("Error loading tuning data from {}: {}", file_name, e);
+                return;
+            }
+        }
+        println!(
+            "Loaded {} tuning prompts for vocabulary build after pruning, vocab = {}",
+            training_data.num_prompts(),
+            training_data.get_model().vocab_size()
+        );
+        training_data.clear_prompts();
+
+        training_data.get_model_mut().initialize_embeddings();
+    } else {
+        println!(
+            "Resume mode: vocabulary is frozen from checkpoint (min_count and vocab rebuild are skipped)."
+        );
+    }
 
     let pretrain_lr_schedule = if args.pretrain_warmup > 0 {
         Some(LrSchedule::CosineWithWarmup {
@@ -359,7 +411,9 @@ fn main() {
         }
     }
 
-    if pretraining_data.num_sequences() > 0 {
+    if args.resume_skip_pretraining {
+        println!("Skipping pretraining phase (--resume-skip-pretraining=true).");
+    } else if pretraining_data.num_sequences() > 0 {
         println!(
             "Pretraining on {} sequences (avg ~{} tokens, without <stop>)",
             pretraining_data.num_sequences(),
