@@ -38,6 +38,9 @@ struct BlipArgs {
 
     #[arg(long, default_value = "0", help = "RNG seed for sampling (0 = random)")]
     pub seed: u64,
+
+    #[arg(long, default_value = "1.0", help = "Repetition penalty; >1.0 discourages repeating tokens")]
+    pub repetition_penalty: f32,
 }
 
 /// Build the inference token prompt: `[<user>, ...user_tokens, <ai>]`.
@@ -126,6 +129,7 @@ fn main() {
         top_k: args.top_k,
         top_p: args.top_p,
         max_new_tokens: args.max_new_tokens,
+        repetition_penalty: args.repetition_penalty,
     };
 
     if let Some(prompt) = args.prompt.as_deref() {

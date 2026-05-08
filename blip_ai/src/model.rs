@@ -487,6 +487,8 @@ pub struct SamplingConfig {
     pub top_k: Option<usize>,
     pub top_p: Option<f32>,
     pub max_new_tokens: usize,
+    /// Values > 1.0 penalise repetition; 1.0 = disabled.
+    pub repetition_penalty: f32,
 }
 
 impl Default for SamplingConfig {
@@ -496,6 +498,7 @@ impl Default for SamplingConfig {
             top_k: None,
             top_p: None,
             max_new_tokens: 64,
+            repetition_penalty: 1.0,
         }
     }
 }
@@ -507,11 +510,29 @@ impl SamplingConfig {
             top_k: None,
             top_p: None,
             max_new_tokens,
+            repetition_penalty: 1.0,
         }
     }
 }
 
-fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &mut R) -> usize {
+fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, generated: &[usize], rng: &mut R) -> usize {
+    // Apply repetition penalty to raw logits before any other transformation.
+    // Clamp penalty to [1.0, inf) to avoid logit explosion.
+    let penalty = cfg.repetition_penalty.max(1.0);
+    let penalised: Array1<f32> = if penalty != 1.0 {
+        let mut l = logits.clone();
+        for &id in generated {
+            if id < l.len() {
+                let v = l[id];
+                l[id] = if v >= 0.0 { v / penalty } else { v * penalty };
+            }
+        }
+        l
+    } else {
+        logits.clone()
+    };
+    let logits = &penalised;
+
     if cfg.temperature <= 0.0 {
         // Greedy
         let mut best = 0usize;
@@ -533,7 +554,7 @@ fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &
     if let Some(k) = cfg.top_k {
         if k > 0 && k < probs.len() {
             let mut idxs: Vec<usize> = (0..probs.len()).collect();
-            idxs.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
+            idxs.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
             let keep: std::collections::HashSet<usize> = idxs.into_iter().take(k).collect();
             for (i, p) in probs.iter_mut().enumerate() {
                 if !keep.contains(&i) {
@@ -552,7 +573,7 @@ fn sample_from_logits<R: Rng>(logits: &Array1<f32>, cfg: &SamplingConfig, rng: &
     // top-p (nucleus) mask: keep smallest set whose cumulative prob >= p
     if let Some(p_cut) = cfg.top_p {
         let mut idxs: Vec<usize> = (0..probs.len()).collect();
-        idxs.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap());
+        idxs.sort_unstable_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
         let mut cum = 0.0_f32;
         let mut keep = std::collections::HashSet::new();
         for &i in &idxs {
@@ -1206,7 +1227,7 @@ impl Model {
         let mut logits = logits_opt.expect("prompt is non-empty");
         let mut out: Vec<usize> = Vec::new();
         for _ in 0..cfg.max_new_tokens {
-            let next = sample_from_logits(&logits, cfg, rng);
+            let next = sample_from_logits(&logits, cfg, &out, rng);
             if next == stop {
                 break;
             }

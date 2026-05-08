@@ -118,7 +118,7 @@ struct TrainingArgs {
     #[arg(long, default_value = "256", help = "Target sequence length (tokens) for pretraining corpus loader")]
     pub seq_length: usize,
 
-    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*"], help = "Pretraining (corpus) files to use. Wild cards are supported but does not recurse in subdirectories.")]
+    #[arg(short = 'p', long, default_values = vec!["training/pretraining/*"], help = "Pretraining (corpus) files to use. Wild cards are supported but does not recurse in subdirectories."x)]
     pub pretraining_files: Vec<String>,
 
     #[arg(short = 't', long = "tuning-files", default_values = vec!["training/tuning/*"], help = "Tuning files to use. Wild cards are supported but does not recurse in subdirectories.")]

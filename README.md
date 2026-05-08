@@ -104,6 +104,7 @@ cargo run --release -p blip -- -t 0.8 --seed 1
 | `-t, --temperature` | 0.0 (= greedy)      | Sampling temperature                        |
 | `--top-k`         | none                  | Top-k filter                                |
 | `--top-p`         | none                  | Nucleus-sampling cutoff                     |
+| `--repetition-penalty` | 1.0               | Penalize repeating tokens (> 1.0 to suppress) |
 | `--seed`          | 0 (= OS entropy)      | Sampling RNG seed                           |
 
 ## Architecture
